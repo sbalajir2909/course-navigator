@@ -20,15 +20,63 @@ const StudentCourseView = () => {
 
   useEffect(() => {
     if (!courseId) return;
-    api.courseGraph(courseId).then((data: any) => {
-      const studentId = localStorage.getItem("assign_student_id");
-      const mods: Module[] = (data.modules || []).map((m: any, i: number) => ({
-        id: m.id,
-        title: m.title,
-        completed: m.completed ?? false,
-        unlocked: m.unlocked ?? i === 0,
-        mastery: m.mastery ?? 0,
-      }));
+    localStorage.setItem("assign_course_id", courseId);
+
+    // Fetch graph to get module list, and optionally student progress
+    const studentId = localStorage.getItem("assign_student_id");
+
+    Promise.all([
+      api.courseGraph(courseId),
+      studentId
+        ? api.studentProgress(courseId, studentId).catch(() => null)
+        : Promise.resolve(null),
+    ]).then(([graphData, progressData]) => {
+      // The graph API returns { nodes, edges } - extract modules from nodes
+      const nodes = graphData.nodes || graphData.modules || [];
+      const progressMap: Record<string, { completed: boolean; mastery: number }> =
+        {};
+      if (progressData?.modules) {
+        for (const pm of progressData.modules) {
+          progressMap[pm.id] = {
+            completed: pm.completed ?? false,
+            mastery: pm.mastery ?? 0,
+          };
+        }
+      }
+
+      // Build edge map to determine prerequisites
+      const edges = graphData.edges || [];
+      const prerequisites: Record<string, string[]> = {};
+      for (const edge of edges) {
+        if (!prerequisites[edge.target]) prerequisites[edge.target] = [];
+        prerequisites[edge.target].push(edge.source);
+      }
+
+      const mods: Module[] = nodes.map((n: any, i: number) => {
+        const nodeId = n.id;
+        const title = n.data?.label || n.title || `Module ${i + 1}`;
+        const prog = progressMap[nodeId];
+
+        // A module is unlocked if it has no prerequisites, or all prerequisites are completed
+        const prereqs = prerequisites[nodeId] || [];
+        const allPrereqsDone =
+          prereqs.length === 0 ||
+          prereqs.every((pid: string) => progressMap[pid]?.completed);
+
+        return {
+          id: nodeId,
+          title,
+          completed: prog?.completed ?? false,
+          unlocked: n.unlocked ?? allPrereqsDone ?? i === 0,
+          mastery: prog?.mastery ?? 0,
+        };
+      });
+
+      // Ensure at least the first module is unlocked
+      if (mods.length > 0 && !mods.some((m) => m.unlocked)) {
+        mods[0].unlocked = true;
+      }
+
       setModules(mods);
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -61,7 +109,7 @@ const StudentCourseView = () => {
           {modules.map((mod, i) => (
             <button
               key={mod.id}
-              onClick={() => mod.unlocked && navigate(`/learn/${mod.id}`)}
+              onClick={() => mod.unlocked && navigate(`/course/${courseId}/learn/${mod.id}`)}
               disabled={!mod.unlocked}
               className={`w-full flex items-center gap-3 px-4 py-3 text-left text-sm transition-colors ${
                 mod.unlocked ? "hover:bg-sidebar-accent cursor-pointer" : "opacity-50 cursor-not-allowed"

@@ -260,7 +260,7 @@ function CourseGraphInner() {
               </ul>
             </div>
           )}
-          <Button className="w-full" onClick={() => window.open(`/learn/${selectedModule.id}`, "_blank")}>
+          <Button className="w-full" onClick={() => window.open(`/course/${id}/learn/${selectedModule.id}`, "_blank")}>
             View Assessments
           </Button>
         </div>

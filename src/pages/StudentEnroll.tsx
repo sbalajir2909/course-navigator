@@ -20,7 +20,8 @@ const StudentEnroll = () => {
       const data = await api.enroll(courseId, { name, email });
       localStorage.setItem("assign_student_id", data.student_id);
       localStorage.setItem("assign_student_name", name);
-      navigate(`/course/${courseId}/learn`);
+      localStorage.setItem("assign_course_id", courseId);
+      navigate(`/course/${courseId}/diagnostic`);
     } catch {
       setLoading(false);
     }

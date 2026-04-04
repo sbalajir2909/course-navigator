@@ -40,6 +40,9 @@ export const api = {
   moduleAssessments: (courseId: string, moduleId: string) =>
     fetch(`${API}/api/courses/${courseId}/modules/${moduleId}/assessments`).then((r) => r.json()),
 
+  studentProgress: (courseId: string, studentId: string) =>
+    fetch(`${API}/api/courses/${courseId}/students/${studentId}/progress`).then((r) => r.json()),
+
   dashboardStats: (courseId: string) =>
     fetch(`${API}/api/dashboard/${courseId}/stats`).then((r) => r.json()),
 

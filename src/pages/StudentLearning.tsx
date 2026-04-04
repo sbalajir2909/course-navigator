@@ -6,7 +6,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ArrowRight, Loader2 } from "lucide-react";
+import { ArrowRight, Loader2, AlertTriangle } from "lucide-react";
 
 const tierColors: Record<string, string> = {
   recall: "bg-indigo-100 text-indigo-700",
@@ -14,8 +14,22 @@ const tierColors: Record<string, string> = {
   synthesis: "bg-emerald-100 text-emerald-700",
 };
 
+async function ensureStudentId(courseId: string): Promise<string> {
+  const existing = localStorage.getItem("assign_student_id");
+  if (existing) return existing;
+
+  const data = await api.enroll(courseId, {
+    email: "student@demo.com",
+    name: "Demo Student",
+  });
+  localStorage.setItem("assign_student_id", data.student_id);
+  localStorage.setItem("assign_student_name", "Demo Student");
+  localStorage.setItem("assign_course_id", courseId);
+  return data.student_id;
+}
+
 const StudentLearning = () => {
-  const { moduleId } = useParams<{ moduleId: string }>();
+  const { courseId, moduleId } = useParams<{ courseId: string; moduleId: string }>();
   const navigate = useNavigate();
 
   // Learn state
@@ -25,6 +39,8 @@ const StudentLearning = () => {
   const [response, setResponse] = useState("");
   const [feedback, setFeedback] = useState<any>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [failCount, setFailCount] = useState(0);
+  const [prerequisiteHint, setPrerequisiteHint] = useState<string | null>(null);
   const explanationRef = useRef<HTMLDivElement>(null);
 
   // Quiz state
@@ -32,12 +48,25 @@ const StudentLearning = () => {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [quizResults, setQuizResults] = useState<any>(null);
 
+  // Store courseId in localStorage whenever we have it
   useEffect(() => {
-    if (!moduleId) return;
-    const studentId = localStorage.getItem("assign_student_id") || "anon";
-    api.teachStart(moduleId, studentId).then((data) => {
+    if (courseId) {
+      localStorage.setItem("assign_course_id", courseId);
+    }
+  }, [courseId]);
+
+  useEffect(() => {
+    if (!moduleId || !courseId) return;
+    let cancelled = false;
+
+    (async () => {
+      const studentId = await ensureStudentId(courseId);
+      if (cancelled) return;
+
+      const data = await api.teachStart(moduleId, studentId);
+      if (cancelled) return;
+
       setSessionId(data.session_id);
-      // Start SSE
       const es = api.teachExplainSSE(data.session_id);
       setStreaming(true);
       es.onmessage = (e) => {
@@ -52,8 +81,10 @@ const StudentLearning = () => {
         es.close();
         setStreaming(false);
       };
-    });
-  }, [moduleId]);
+    })();
+
+    return () => { cancelled = true; };
+  }, [moduleId, courseId]);
 
   useEffect(() => {
     if (explanationRef.current) {
@@ -61,20 +92,46 @@ const StudentLearning = () => {
     }
   }, [explanation]);
 
+  // Check for prerequisite recommendation when student fails twice
+  useEffect(() => {
+    if (failCount >= 2 && courseId) {
+      // Look up prerequisite from learning path data in localStorage
+      const pathData = localStorage.getItem(`assign_learning_path_${courseId}`);
+      if (pathData) {
+        try {
+          const path = JSON.parse(pathData);
+          const currentIdx = path.findIndex((m: any) => m.id === moduleId);
+          if (currentIdx > 0) {
+            const prereq = path[currentIdx - 1];
+            if (prereq && !prereq.skip) {
+              setPrerequisiteHint(prereq.title);
+            }
+          }
+        } catch {}
+      }
+    }
+  }, [failCount, courseId, moduleId]);
+
   const handleSubmitResponse = async () => {
     if (!sessionId || !response.trim()) return;
     setSubmitting(true);
     try {
       const data = await api.teachSubmit(sessionId, response);
       setFeedback(data);
+      if (data.mastery < 50) {
+        setFailCount((c) => c + 1);
+      }
     } catch {}
     setSubmitting(false);
   };
 
+  const handleRetry = () => {
+    setFeedback(null);
+    setResponse("");
+  };
+
   const loadQuiz = async () => {
-    if (!moduleId) return;
-    // Extract courseId from URL or use a placeholder
-    const courseId = localStorage.getItem("assign_course_id") || "default";
+    if (!moduleId || !courseId) return;
     try {
       const data = await api.moduleAssessments(courseId, moduleId);
       setQuestions(data.questions || []);
@@ -92,7 +149,32 @@ const StudentLearning = () => {
   return (
     <div className="min-h-screen bg-secondary/30">
       <div className="max-w-3xl mx-auto py-8 px-4 space-y-6">
-        <h1 className="text-2xl font-bold text-foreground">Module: {moduleId}</h1>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => navigate(`/course/${courseId}/learn`)}>
+            ← Back to Course
+          </Button>
+          <h1 className="text-2xl font-bold text-foreground">Module: {moduleId}</h1>
+        </div>
+
+        {/* Prerequisite recommendation banner */}
+        {prerequisiteHint && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-amber-800">
+                This topic seems challenging. We recommend completing <strong>{prerequisiteHint}</strong> first before continuing.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-2 border-amber-300 text-amber-700 hover:bg-amber-100"
+                onClick={() => navigate(`/course/${courseId}/learn`)}
+              >
+                Go to Learning Path
+              </Button>
+            </div>
+          </div>
+        )}
 
         <Tabs defaultValue="learn" className="space-y-4">
           <TabsList>
@@ -134,11 +216,17 @@ const StudentLearning = () => {
                   </div>
                   <Progress value={feedback.mastery} className="h-2.5" />
                 </div>
-                {feedback.advance && (
-                  <Button onClick={() => navigate(-1)}>
-                    Next Module <ArrowRight className="h-4 w-4 ml-1.5" />
-                  </Button>
-                )}
+                <div className="flex gap-2">
+                  {feedback.advance ? (
+                    <Button onClick={() => navigate(`/course/${courseId}/learn`)}>
+                      Next Module <ArrowRight className="h-4 w-4 ml-1.5" />
+                    </Button>
+                  ) : (
+                    <Button variant="outline" onClick={handleRetry}>
+                      Try Again
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
           </TabsContent>
