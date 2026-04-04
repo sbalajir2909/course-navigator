@@ -21,6 +21,13 @@ interface Intervention {
   stuck_modules: string[];
 }
 
+interface StruggleRow {
+  student_name: string;
+  module_title: string;
+  attempts: number;
+  last_score: number;
+}
+
 const getHeatColor = (v: number) => {
   if (v >= 80) return "bg-emerald-500";
   if (v >= 60) return "bg-emerald-300";
@@ -34,12 +41,14 @@ const ProfessorDashboard = () => {
   const [stats, setStats] = useState<Stats | null>(null);
   const [heatmap, setHeatmap] = useState<HeatmapData | null>(null);
   const [interventions, setInterventions] = useState<Intervention[]>([]);
+  const [struggles, setStruggles] = useState<StruggleRow[]>([]);
 
   useEffect(() => {
     if (!courseId) return;
     api.dashboardStats(courseId).then(setStats).catch(() => {});
     api.dashboardHeatmap(courseId).then(setHeatmap).catch(() => {});
     api.dashboardInterventions(courseId).then((d) => setInterventions(d.interventions || [])).catch(() => {});
+    api.dashboardStruggles(courseId).then((d) => setStruggles(d.struggles || [])).catch(() => {});
   }, [courseId]);
 
   const handleExport = async () => {
@@ -109,6 +118,64 @@ const ProfessorDashboard = () => {
                   ))}
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Student Struggles */}
+        {heatmap && (
+          <div className="bg-card border rounded-lg p-5 space-y-3">
+            <h2 className="font-semibold text-foreground">Student Struggles</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-2 px-3 text-muted-foreground font-medium">Student</th>
+                    <th className="text-left py-2 px-3 text-muted-foreground font-medium">Module</th>
+                    <th className="text-left py-2 px-3 text-muted-foreground font-medium">Attempts</th>
+                    <th className="text-left py-2 px-3 text-muted-foreground font-medium">Last Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {struggles.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-4 text-center text-muted-foreground">
+                        No struggle data available yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    struggles.map((s, i) => (
+                      <tr
+                        key={i}
+                        className={`border-b ${
+                          s.attempts > 2
+                            ? "bg-red-50"
+                            : s.attempts > 1
+                            ? "bg-yellow-50"
+                            : ""
+                        }`}
+                      >
+                        <td className="py-2 px-3 text-foreground">{s.student_name}</td>
+                        <td className="py-2 px-3 text-foreground">{s.module_title}</td>
+                        <td className="py-2 px-3">
+                          <span
+                            className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                              s.attempts > 2
+                                ? "bg-red-100 text-red-700"
+                                : s.attempts > 1
+                                ? "bg-yellow-100 text-yellow-700"
+                                : "bg-gray-100 text-gray-700"
+                            }`}
+                          >
+                            {s.attempts}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-foreground">{s.last_score}%</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

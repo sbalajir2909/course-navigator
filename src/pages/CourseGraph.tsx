@@ -130,6 +130,9 @@ function CourseGraphInner() {
           source: e.source,
           target: e.target,
           animated: e.animated ?? true,
+          type: "smoothstep",
+          label: "prerequisite",
+          labelStyle: { fontSize: 10, fill: "#6366f1" },
           style: { stroke: "hsl(var(--primary))" },
         }));
         setNodes(flowNodes);
