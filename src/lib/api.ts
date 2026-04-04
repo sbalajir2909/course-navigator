@@ -27,21 +27,15 @@ export const api = {
       body: JSON.stringify({ module_id: moduleId, student_id: studentId }),
     }).then((r) => r.json()),
 
-  teachExplainSSE: (sessionId: string) =>
-    new EventSource(`${API}/api/teach/${sessionId}/explain`),
-
-  teachSubmit: (sessionId: string, response: string) =>
+  teachSubmit: (sessionId: string, explanation: string) =>
     fetch(`${API}/api/teach/${sessionId}/submit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ response }),
+      body: JSON.stringify({ explanation }),
     }).then((r) => r.json()),
 
   moduleAssessments: (courseId: string, moduleId: string) =>
     fetch(`${API}/api/courses/${courseId}/modules/${moduleId}/assessments`).then((r) => r.json()),
-
-  studentProgress: (courseId: string, studentId: string) =>
-    fetch(`${API}/api/courses/${courseId}/students/${studentId}/progress`).then((r) => r.json()),
 
   dashboardStats: (courseId: string) =>
     fetch(`${API}/api/dashboard/${courseId}/stats`).then((r) => r.json()),

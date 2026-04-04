@@ -41,6 +41,7 @@ const StudentLearning = () => {
   const [submitting, setSubmitting] = useState(false);
   const [failCount, setFailCount] = useState(0);
   const [prerequisiteHint, setPrerequisiteHint] = useState<string | null>(null);
+  const [moduleTitle, setModuleTitle] = useState<string>("");
   const explanationRef = useRef<HTMLDivElement>(null);
 
   // Quiz state
@@ -55,6 +56,18 @@ const StudentLearning = () => {
     }
   }, [courseId]);
 
+  // Fetch module title from course details
+  useEffect(() => {
+    if (!courseId || !moduleId) return;
+    api.courseDetail(courseId).then((course) => {
+      const modules = course.modules || [];
+      const mod = modules.find((m: any) => m.id === moduleId);
+      if (mod?.title) {
+        setModuleTitle(mod.title);
+      }
+    }).catch(() => {});
+  }, [courseId, moduleId]);
+
   useEffect(() => {
     if (!moduleId || !courseId) return;
     let cancelled = false;
@@ -67,20 +80,46 @@ const StudentLearning = () => {
       if (cancelled) return;
 
       setSessionId(data.session_id);
-      const es = api.teachExplainSSE(data.session_id);
       setStreaming(true);
-      es.onmessage = (e) => {
-        if (e.data === "[DONE]") {
-          es.close();
-          setStreaming(false);
-          return;
+
+      // Use fetch + streaming reader for proper SSE parsing
+      try {
+        const resp = await fetch(`http://localhost:8000/api/teach/${data.session_id}/explain`);
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          if (cancelled) break;
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const payload = line.slice(6);
+              if (payload === '[DONE]') {
+                setStreaming(false);
+                return;
+              }
+              try {
+                const event = JSON.parse(payload);
+                if (event.token) {
+                  setExplanation((prev) => prev + event.token);
+                }
+                if (event.done) {
+                  setStreaming(false);
+                  return;
+                }
+              } catch {}
+            }
+          }
         }
-        setExplanation((prev) => prev + e.data);
-      };
-      es.onerror = () => {
-        es.close();
         setStreaming(false);
-      };
+      } catch {
+        setStreaming(false);
+      }
     })();
 
     return () => { cancelled = true; };
@@ -150,10 +189,10 @@ const StudentLearning = () => {
     <div className="min-h-screen bg-secondary/30">
       <div className="max-w-3xl mx-auto py-8 px-4 space-y-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => navigate(`/course/${courseId}/learn`)}>
+          <Button variant="ghost" size="sm" onClick={() => navigate(`/course/${courseId}`)}>
             ← Back to Course
           </Button>
-          <h1 className="text-2xl font-bold text-foreground">Module: {moduleId}</h1>
+          <h1 className="text-2xl font-bold text-foreground">{moduleTitle || "Loading module…"}</h1>
         </div>
 
         {/* Prerequisite recommendation banner */}
@@ -192,23 +231,46 @@ const StudentLearning = () => {
               {streaming && <span className="inline-block w-1.5 h-4 bg-primary animate-pulse ml-0.5 align-text-bottom" />}
             </div>
 
+            {/* Post-stream prompt */}
+            {!streaming && explanation && !feedback && (
+              <div className="bg-primary/5 border border-primary/20 rounded-lg p-4">
+                <p className="text-sm font-medium text-primary">
+                  Now explain this concept in your own words to demonstrate your understanding.
+                </p>
+              </div>
+            )}
+
             {/* Student response */}
             {!feedback ? (
               <div className="space-y-3">
                 <Textarea
                   value={response}
                   onChange={(e) => setResponse(e.target.value)}
-                  placeholder="Explain this concept in your own words…"
+                  placeholder="Type your explanation here…"
                   className="min-h-[120px]"
                 />
-                <Button onClick={handleSubmitResponse} disabled={submitting || !response.trim()}>
-                  {submitting ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Submitting…</> : "Submit"}
+                <Button onClick={handleSubmitResponse} disabled={submitting || !response.trim() || streaming}>
+                  {submitting ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Submitting…</> : "Submit My Explanation"}
                 </Button>
               </div>
             ) : (
               <div className="bg-card border rounded-lg p-6 space-y-4">
                 <h3 className="font-semibold text-foreground">Feedback</h3>
                 <p className="text-sm text-muted-foreground">{feedback.feedback}</p>
+
+                {/* Score breakdown */}
+                {feedback.scores && (
+                  <div className="space-y-2">
+                    {Object.entries(feedback.scores).map(([key, val]) => (
+                      <div key={key} className="flex justify-between text-xs text-muted-foreground">
+                        <span className="capitalize">{key.replace(/_/g, ' ')}</span>
+                        <span className="font-medium">{String(val)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Mastery progress bar */}
                 <div className="space-y-1">
                   <div className="flex justify-between text-sm">
                     <span className="text-foreground">Mastery Score</span>
@@ -216,6 +278,7 @@ const StudentLearning = () => {
                   </div>
                   <Progress value={feedback.mastery} className="h-2.5" />
                 </div>
+
                 <div className="flex gap-2">
                   {feedback.advance ? (
                     <Button onClick={() => navigate(`/course/${courseId}/learn`)}>

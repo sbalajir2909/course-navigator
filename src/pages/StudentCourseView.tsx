@@ -22,27 +22,12 @@ const StudentCourseView = () => {
     if (!courseId) return;
     localStorage.setItem("assign_course_id", courseId);
 
-    // Fetch graph to get module list, and optionally student progress
-    const studentId = localStorage.getItem("assign_student_id");
-
-    Promise.all([
-      api.courseGraph(courseId),
-      studentId
-        ? api.studentProgress(courseId, studentId).catch(() => null)
-        : Promise.resolve(null),
-    ]).then(([graphData, progressData]) => {
+    // Fetch graph to get module list (progress endpoint not available yet)
+    api.courseGraph(courseId).then((graphData) => {
       // The graph API returns { nodes, edges } - extract modules from nodes
       const nodes = graphData.nodes || graphData.modules || [];
       const progressMap: Record<string, { completed: boolean; mastery: number }> =
         {};
-      if (progressData?.modules) {
-        for (const pm of progressData.modules) {
-          progressMap[pm.id] = {
-            completed: pm.completed ?? false,
-            mastery: pm.mastery ?? 0,
-          };
-        }
-      }
 
       // Build edge map to determine prerequisites
       const edges = graphData.edges || [];
