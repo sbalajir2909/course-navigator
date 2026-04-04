@@ -16,7 +16,12 @@ interface ChatMessage {
   streaming?: boolean;
 }
 
-type Phase = "loading" | "prereq" | "teaching" | "respond" | "feedback";
+type Phase = "loading" | "prereq" | "teaching" | "respond" | "feedback" | "give_up";
+
+/* ---------- Constants ---------- */
+
+const RETRY_STRATEGIES = ["simplified", "analogy", "worked_example"] as const;
+const MAX_RETRIES = 3;
 
 /* ---------- Helpers ---------- */
 
@@ -39,6 +44,16 @@ function nextId() {
   return `msg-${++msgCounter}`;
 }
 
+function masteryBarColor(pct: number): string {
+  if (pct < 40) return "bg-red-500";
+  if (pct <= 70) return "bg-yellow-500";
+  return "bg-emerald-500";
+}
+
+function formatDimensionLabel(key: string): string {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /* ---------- Component ---------- */
 
 const StudentLearning = () => {
@@ -52,8 +67,10 @@ const StudentLearning = () => {
   const [submitting, setSubmitting] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [failCount, setFailCount] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
   const [prerequisiteHint, setPrerequisiteHint] = useState<string | null>(null);
   const [useSimplified, setUseSimplified] = useState(false);
+  const [masteryPct, setMasteryPct] = useState<number | null>(null);
 
   // Prereq quiz state
   const [prereqQuestions, setPrereqQuestions] = useState<any[]>([]);
@@ -178,7 +195,7 @@ const StudentLearning = () => {
   };
 
   // Start the teaching stream
-  const startTeaching = async (simplified: boolean) => {
+  const startTeaching = async (simplified: boolean, strategy?: string) => {
     if (!moduleId || !courseId) return;
 
     const studentId = await ensureStudentId(courseId);
@@ -191,11 +208,13 @@ const StudentLearning = () => {
       { id: streamMsgId, role: "ai", content: "", streaming: true },
     ]);
 
+    // Determine query param for strategy
+    const strategyParam = strategy || (simplified ? "simplified" : "");
+    const qs = strategyParam ? `?strategy=${strategyParam}` : "";
+
     try {
       const resp = await fetch(
-        `http://localhost:8000/api/teach/${data.session_id}/explain${
-          simplified ? "?strategy=simplified" : ""
-        }`
+        `http://localhost:8000/api/teach/${data.session_id}/explain${qs}`
       );
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
@@ -256,6 +275,32 @@ const StudentLearning = () => {
     }
   };
 
+  // Adaptive re-teach: trigger a new session with a different strategy
+  const triggerAdaptiveReteach = async (currentRetry: number) => {
+    if (!moduleId || !courseId) return;
+
+    if (currentRetry >= MAX_RETRIES) {
+      // Give up after max retries
+      addMessage(
+        "ai",
+        "No worries! This is a tough concept. I've flagged this for your professor. Let's move on."
+      );
+      setPhase("give_up");
+      return;
+    }
+
+    const strategyIndex = Math.min(currentRetry, RETRY_STRATEGIES.length - 1);
+    const strategy = RETRY_STRATEGIES[strategyIndex];
+
+    addMessage("ai", "Let me try a different approach...");
+
+    // Brief pause for UX
+    await new Promise((r) => setTimeout(r, 600));
+
+    setPhase("teaching");
+    await startTeaching(false, strategy);
+  };
+
   // Submit student explanation
   const handleSubmitResponse = async () => {
     if (!sessionId || !response.trim()) return;
@@ -267,28 +312,44 @@ const StudentLearning = () => {
     try {
       const data = await api.teachSubmit(sessionId, text);
 
-      // Build feedback message
+      const masteryPctValue = Math.round(data.mastery_probability * 100);
+      const overallPctValue = Math.round(data.overall_score * 100);
+      setMasteryPct(masteryPctValue);
+
+      // Build feedback message with prominent feedback text
       let feedbackText = data.feedback || "";
+
+      // Add dimension score pills
       if (data.scores) {
-        feedbackText +=
-          "\n\n**Scores:**\n" +
-          Object.entries(data.scores)
-            .map(([k, v]) => `- ${k.replace(/_/g, " ")}: ${v}`)
-            .join("\n");
+        const pills = Object.entries(data.scores)
+          .map(([k, v]) => `${formatDimensionLabel(k)}: ${Math.round((v as number) * 100)}%`)
+          .join(" | ");
+        feedbackText += `\n\n${pills}`;
       }
-      feedbackText += `\n\n**Mastery: ${data.mastery}%**`;
+
+      feedbackText += `\n\n**Overall Score: ${overallPctValue}%**`;
+      feedbackText += `\n**Mastery: ${masteryPctValue}%**`;
 
       addMessage("ai", feedbackText);
 
       if (data.advance) {
-        addMessage("ai", "✓ Module complete! Move to next →");
+        addMessage("ai", "Module complete! Move to next module.");
         setPhase("feedback");
       } else {
-        if (data.mastery < 50) {
-          setFailCount((c) => c + 1);
+        const newFailCount = failCount + 1;
+        setFailCount(newFailCount);
+
+        // Detect low score: adaptive re-teach
+        if (data.overall_score < 0.3) {
+          const newRetryCount = retryCount + 1;
+          setRetryCount(newRetryCount);
+          setSubmitting(false);
+          await triggerAdaptiveReteach(newRetryCount);
+          return;
+        } else {
+          addMessage("ai", "Try explaining again — you can refine your understanding.");
+          setPhase("respond");
         }
-        addMessage("ai", "Try explaining again — you can refine your understanding.");
-        setPhase("respond");
       }
     } catch {
       addMessage("ai", "Something went wrong. Please try again.");
@@ -336,6 +397,24 @@ const StudentLearning = () => {
           {moduleTitle || "Loading module…"}
         </h1>
       </div>
+
+      {/* Mastery progress bar */}
+      {masteryPct !== null && (
+        <div className="px-4 py-2 bg-card border-b shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+              <span>Mastery Progress</span>
+              <span>{masteryPct}%</span>
+            </div>
+            <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${masteryBarColor(masteryPct)}`}
+                style={{ width: `${masteryPct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Prerequisite warning banner */}
       {prerequisiteHint && (
@@ -441,6 +520,18 @@ const StudentLearning = () => {
             <Button
               onClick={() => navigate(`/course/${courseId}/learn`)}
               className="bg-emerald-600 hover:bg-emerald-700"
+            >
+              Next Module <ArrowRight className="h-4 w-4 ml-1.5" />
+            </Button>
+          </div>
+        )}
+
+        {/* Give up / max retries reached */}
+        {phase === "give_up" && (
+          <div className="flex justify-center">
+            <Button
+              onClick={() => navigate(`/course/${courseId}/learn`)}
+              className="bg-indigo-600 hover:bg-indigo-700"
             >
               Next Module <ArrowRight className="h-4 w-4 ml-1.5" />
             </Button>
