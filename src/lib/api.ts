@@ -10,6 +10,9 @@ export const api = {
   courseGraph: (courseId: string) =>
     fetch(`${API}/api/courses/${courseId}/graph`).then((r) => r.json()),
 
+  courseDetail: (courseId: string) =>
+    fetch(`${API}/api/courses/${courseId}`).then((r) => r.json()),
+
   enroll: (courseId: string, data: { name: string; email: string }) =>
     fetch(`${API}/api/courses/${courseId}/enroll`, {
       method: "POST",
