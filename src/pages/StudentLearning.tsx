@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { ArrowRight, Loader2, AlertTriangle, Send } from "lucide-react";
+import { ArrowRight, Loader2, AlertTriangle, Send, Mic, Volume2, VolumeX } from "lucide-react";
 
 /* ---------- Types ---------- */
 
@@ -80,10 +80,59 @@ const StudentLearning = () => {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Voice state
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const hasSpeechRecognition =
+    typeof window !== "undefined" &&
+    ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, prereqQuestions, prereqDone]);
+
+  // TTS: speak the latest AI message when it finishes streaming
+  const prevMessagesLenRef = useRef(0);
+  const prevStreamingRef = useRef<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!voiceEnabled || messages.length === 0) {
+      prevMessagesLenRef.current = messages.length;
+      const streamMap: Record<string, boolean> = {};
+      messages.forEach((m) => { if (m.streaming !== undefined) streamMap[m.id] = !!m.streaming; });
+      prevStreamingRef.current = streamMap;
+      return;
+    }
+
+    const last = messages[messages.length - 1];
+
+    // Case 1: New AI message added that's already complete (not streaming)
+    if (messages.length > prevMessagesLenRef.current && last.role === "ai" && !last.streaming && last.content) {
+      speak(last.content);
+    }
+
+    // Case 2: A streaming AI message just finished (streaming went from true to false)
+    if (messages.length === prevMessagesLenRef.current) {
+      for (const msg of messages) {
+        if (
+          msg.role === "ai" &&
+          !msg.streaming &&
+          prevStreamingRef.current[msg.id] === true &&
+          msg.content
+        ) {
+          speak(msg.content);
+          break;
+        }
+      }
+    }
+
+    prevMessagesLenRef.current = messages.length;
+    const streamMap: Record<string, boolean> = {};
+    messages.forEach((m) => { if (m.streaming !== undefined) streamMap[m.id] = !!m.streaming; });
+    prevStreamingRef.current = streamMap;
+  }, [messages, voiceEnabled]);
 
   // Store courseId
   useEffect(() => {
@@ -377,6 +426,84 @@ const StudentLearning = () => {
     }
   }, [failCount, courseId, moduleId]);
 
+  // --- Voice: Text-to-Speech ---
+  const speak = (text: string) => {
+    if (!voiceEnabled || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+    const voices = window.speechSynthesis.getVoices();
+    const preferred =
+      voices.find((v) => v.name.includes("Google") && v.lang === "en-US") ||
+      voices.find((v) => v.lang === "en-US") ||
+      voices[0];
+    if (preferred) utterance.voice = preferred;
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const stopSpeaking = () => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  };
+
+  // --- Voice: Speech-to-Text ---
+  const toggleRecording = () => {
+    if (isRecording) {
+      recognitionRef.current?.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    stopSpeaking();
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((r: any) => r[0].transcript)
+        .join("");
+      setResponse(transcript);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+      // Auto-submit: click the send button on next tick so state is settled
+      setTimeout(() => {
+        const sendBtn = document.querySelector<HTMLButtonElement>("[data-voice-submit]");
+        if (sendBtn && !sendBtn.disabled) sendBtn.click();
+      }, 100);
+    };
+
+    recognition.onerror = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognitionRef.current = recognition;
+    setIsRecording(true);
+    recognition.start();
+  };
+
+  // Stop speaking when user starts typing
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    stopSpeaking();
+    setResponse(e.target.value);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -393,9 +520,32 @@ const StudentLearning = () => {
         <Button variant="ghost" size="sm" onClick={() => navigate(`/course/${courseId}/learn`)}>
           ← Back
         </Button>
-        <h1 className="text-lg font-bold text-foreground truncate">
+        <h1 className="text-lg font-bold text-foreground truncate flex-1">
           {moduleTitle || "Loading module…"}
         </h1>
+        <div className="flex items-center gap-2 shrink-0">
+          {isSpeaking && (
+            <span className="text-xs text-muted-foreground animate-pulse">speaking…</span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setVoiceEnabled((v) => {
+                if (v) stopSpeaking();
+                return !v;
+              });
+            }}
+            className="gap-1.5 text-xs"
+          >
+            {voiceEnabled ? (
+              <Volume2 className="h-4 w-4" />
+            ) : (
+              <VolumeX className="h-4 w-4" />
+            )}
+            Voice {voiceEnabled ? "On" : "Off"}
+          </Button>
+        </div>
       </div>
 
       {/* Mastery progress bar */}
@@ -545,17 +695,32 @@ const StudentLearning = () => {
       {(phase === "respond" || phase === "teaching") && (
         <div className="border-t bg-card px-4 py-3 shrink-0">
           <div className="max-w-3xl mx-auto flex items-end gap-3">
+            {hasSpeechRecognition && (
+              <button
+                onClick={toggleRecording}
+                disabled={phase === "teaching" || submitting}
+                className={`h-11 w-11 shrink-0 rounded-full flex items-center justify-center transition-colors ${
+                  isRecording
+                    ? "bg-red-500 text-white animate-pulse"
+                    : "bg-indigo-600 text-white hover:bg-indigo-700"
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+                title={isRecording ? "Stop recording" : "Start voice input"}
+              >
+                <Mic className="h-5 w-5" />
+              </button>
+            )}
             <Textarea
               ref={textareaRef}
               value={response}
-              onChange={(e) => setResponse(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              placeholder="Explain it back in your own words…"
+              placeholder={isRecording ? "Listening…" : "Explain it back in your own words…"}
               className="min-h-[44px] max-h-[120px] resize-none flex-1"
               rows={1}
               disabled={phase === "teaching" || submitting}
             />
             <Button
+              data-voice-submit
               onClick={handleSubmitResponse}
               disabled={submitting || !response.trim() || phase === "teaching"}
               size="icon"
