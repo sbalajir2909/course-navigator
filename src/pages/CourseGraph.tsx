@@ -1,13 +1,17 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "react-router-dom";
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   Controls,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   type Node,
   type Edge,
+  Handle,
+  Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "@/lib/api";
@@ -21,52 +25,80 @@ interface ModuleData {
   title: string;
   description: string;
   learning_objectives: string[];
-  faithfulness: "faithful" | "partial" | "unfaithful";
+  faithfulness: "faithful" | "partial" | "unfaithful" | "FAITHFUL" | "PARTIAL" | "UNFAITHFUL";
   prerequisites: string[];
+  estimated_minutes?: number;
 }
 
-const faithColors: Record<string, string> = {
-  faithful: "bg-success text-primary-foreground",
-  partial: "bg-warning text-foreground",
-  unfaithful: "bg-danger text-primary-foreground",
+const faithConfig: Record<string, { color: string; label: string }> = {
+  faithful: { color: "bg-green-500 text-white", label: "Faithful" },
+  FAITHFUL: { color: "bg-green-500 text-white", label: "Faithful" },
+  partial: { color: "bg-yellow-400 text-black", label: "Partial" },
+  PARTIAL: { color: "bg-yellow-400 text-black", label: "Partial" },
+  unfaithful: { color: "bg-red-500 text-white", label: "Unfaithful" },
+  UNFAITHFUL: { color: "bg-red-500 text-white", label: "Unfaithful" },
 };
 
-const CourseGraph = () => {
+function ModuleNode({ data }: { data: { label: string; module: ModuleData } }) {
+  const m = data.module;
+  const faith = faithConfig[m.faithfulness] || faithConfig.faithful;
+
+  return (
+    <div className="bg-white rounded-xl border border-border px-4 py-3 shadow-sm min-w-[180px] max-w-[220px]">
+      <Handle type="target" position={Position.Top} className="!bg-primary" />
+      <p className="text-sm font-semibold text-foreground leading-tight mb-1.5">{m.title}</p>
+      <div className="flex items-center gap-2">
+        <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold ${faith.color}`}>
+          {faith.label}
+        </span>
+        {m.estimated_minutes != null && (
+          <span className="text-[10px] text-muted-foreground">{m.estimated_minutes} min</span>
+        )}
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!bg-primary" />
+    </div>
+  );
+}
+
+const nodeTypes = { module: ModuleNode };
+
+function CourseGraphInner() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
+  const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedModule, setSelectedModule] = useState<ModuleData | null>(null);
+  const nodesReady = useRef(false);
 
   useEffect(() => {
     if (!id) return;
     api.courseGraph(id).then((data: { modules: ModuleData[]; edges: { source: string; target: string }[] }) => {
       const flowNodes: Node[] = data.modules.map((m, i) => ({
         id: m.id,
-        position: { x: (i % 3) * 280, y: Math.floor(i / 3) * 160 },
+        position: { x: (i % 3) * 300, y: Math.floor(i / 3) * 180 },
         data: { label: m.title, module: m },
-        type: "default",
-        style: {
-          background: "white",
-          border: "1px solid #e2e8f0",
-          borderRadius: "12px",
-          padding: "12px 16px",
-          fontSize: "13px",
-          fontWeight: 500,
-          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        },
+        type: "module",
       }));
       const flowEdges: Edge[] = data.edges.map((e, i) => ({
         id: `e-${i}`,
         source: e.source,
         target: e.target,
         animated: true,
-        style: { stroke: "#6366f1" },
+        style: { stroke: "hsl(var(--primary))" },
       }));
       setNodes(flowNodes);
       setEdges(flowEdges);
+      nodesReady.current = true;
     }).catch(() => {});
   }, [id]);
+
+  useEffect(() => {
+    if (nodesReady.current && nodes.length > 0) {
+      setTimeout(() => fitView({ padding: 0.2 }), 100);
+      nodesReady.current = false;
+    }
+  }, [nodes, fitView]);
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setSelectedModule((node.data as any).module);
@@ -106,6 +138,7 @@ const CourseGraph = () => {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
+          nodeTypes={nodeTypes}
           fitView
         >
           <Background />
@@ -121,8 +154,8 @@ const CourseGraph = () => {
               <X className="h-5 w-5 text-muted-foreground" />
             </button>
           </div>
-          <Badge className={faithColors[selectedModule.faithfulness]}>
-            {selectedModule.faithfulness}
+          <Badge className={faithConfig[selectedModule.faithfulness]?.color}>
+            {faithConfig[selectedModule.faithfulness]?.label}
           </Badge>
           <p className="text-sm text-muted-foreground">{selectedModule.description}</p>
           <div>
@@ -140,6 +173,12 @@ const CourseGraph = () => {
       )}
     </div>
   );
-};
+}
+
+const CourseGraph = () => (
+  <ReactFlowProvider>
+    <CourseGraphInner />
+  </ReactFlowProvider>
+);
 
 export default CourseGraph;
