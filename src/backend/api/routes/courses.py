@@ -26,7 +26,7 @@ class ModuleOut(BaseModel):
     order_index: int
     estimated_minutes: int
     concepts: list | None
-    prerequisites: list[str]  # JSONB array of prerequisite module UUIDs
+    prerequisites: list[str] | None = []
 
 
 class CourseOut(BaseModel):
@@ -104,7 +104,7 @@ async def get_course(course_id: str) -> CourseOut:
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,description,order_index,estimated_minutes,concepts,prerequisites",
+            "select": "id,title,description,order_index,estimated_minutes,concepts",
             "order": "order_index.asc",
         },
     )
@@ -119,7 +119,6 @@ async def get_course(course_id: str) -> CourseOut:
                 order_index=m.get("order_index", 0),
                 estimated_minutes=m.get("estimated_minutes", 30),
                 concepts=m.get("concepts"),
-                prerequisites=m.get("prerequisites") or [],
             )
         )
 
@@ -154,7 +153,7 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,order_index,estimated_minutes,prerequisites",
+            "select": "id,title,order_index,estimated_minutes",
             "order": "order_index.asc",
         },
     )
@@ -184,19 +183,26 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
             )
         )
 
-    # Build edges from prerequisites JSONB array on each module
+    # Build edges from the prerequisites table
+    prereqs_raw = await supabase_query(
+        "prerequisites",
+        params={
+            "course_id": f"eq.{course_id}",
+            "select": "id,module_id,prerequisite_module_id",
+        },
+    )
+
     edges: list[GraphEdge] = []
-    for m in modules_raw:
-        for prereq_id in (m.get("prerequisites") or []):
-            edge_id = f"e-{prereq_id}-{m['id']}"
-            edges.append(
-                GraphEdge(
-                    id=edge_id,
-                    source=prereq_id,
-                    target=m["id"],
-                    animated=False,
-                )
+    for p in prereqs_raw:
+        edge_id = f"e-{p['prerequisite_module_id']}-{p['module_id']}"
+        edges.append(
+            GraphEdge(
+                id=edge_id,
+                source=p["prerequisite_module_id"],
+                target=p["module_id"],
+                animated=False,
             )
+        )
 
     return CourseGraphOut(nodes=nodes, edges=edges)
 
