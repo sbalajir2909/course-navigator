@@ -1,578 +1,671 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Send, Menu, X, Trophy, Star, Flame, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
-import { assign, streamExplanation } from "@/lib/api";
+import { ArrowLeft, Send, Mic, MicOff, Volume2, VolumeX, Trophy, Star, Flame, Upload, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
+
+const ASSIGN_URL = "http://localhost:8000";
 
 interface Message {
   role: "ai" | "user";
   text: string;
   chips?: string[];
+  streaming?: boolean;
+  mastery?: number;
+  feedback?: string;
+  scores?: Record<string, number>;
 }
 
-interface CourseModule {
-  module_id: string;
+interface Module {
+  id: string;
   title: string;
-  progress?: number;
+  description: string;
+  learning_objectives: string[];
+  order_index: number;
+  estimated_minutes: number;
+  faithfulness_verdict: string | null;
+  mastery?: number;
+  completed?: boolean;
 }
 
-const CHIPS = [
-  "I understand \u2713",
-  "Give me a hint \ud83d\udca1",
-  "Show an example \ud83d\udcdd",
-  "I don't know \ud83e\udd37",
-];
+interface Assessment {
+  id: string;
+  question: string;
+  question_type: string;
+  options: string[] | null;
+  correct_answer: string;
+  difficulty_tier: string;
+}
 
-const progressColor = (p: number) =>
-  p >= 60 ? "bg-primary" : p >= 30 ? "bg-warning" : "bg-destructive";
+const STRATEGIES = ["initial", "simplified", "analogy", "worked_example"];
 
-const StudentApp = () => {
+export default function StudentApp() {
   const navigate = useNavigate();
-
-  // Course / module state
-  const [courseId, setCourseId] = useState<string | null>(() => localStorage.getItem("studentCourseId"));
-  const [modules, setModules] = useState<CourseModule[]>([]);
-  const [activeModule, setActiveModule] = useState<CourseModule | null>(null);
-  const [courseName, setCourseName] = useState("My Course");
-
-  // Session state
+  const [modules, setModules] = useState<Module[]>([]);
+  const [selectedModule, setSelectedModule] = useState<Module | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputText, setInputText] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [mastery, setMastery] = useState(0);
-
-  // Chat state
-  const [chatsByModule, setChatsByModule] = useState<Record<string, Message[]>>({});
-  const [input, setInput] = useState("");
-  const [stats, setStats] = useState({ minutes: 0, questions: 0, concepts: 0 });
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [streaming, setStreaming] = useState(false);
+  const [strategyIndex, setStrategyIndex] = useState(0);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [overallMastery, setOverallMastery] = useState(0);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [micOn, setMicOn] = useState(false);
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [courseTitle, setCourseTitle] = useState("");
+  const [professorEmail, setProfessorEmail] = useState("");
+  const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading" | "processing" | "done">("idle");
+  const [uploadMessage, setUploadMessage] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const recognitionRef = useRef<any>(null);
 
-  // Join dialog
-  const [joinDialogOpen, setJoinDialogOpen] = useState(false);
-  const [joinCourseId, setJoinCourseId] = useState("");
+  const courseId = localStorage.getItem("assign_course_id") || "";
+  const studentId = localStorage.getItem("assign_student_id") || "";
+  const studentEmail = localStorage.getItem("assign_student_email") || "student@demo.com";
 
-  // Voice state
-  const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [ttsEnabled, setTtsEnabled] = useState(true);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-
-  const messages = activeModule ? (chatsByModule[activeModule.module_id] || []) : [];
-
-  // Timer
+  // Load modules on mount
   useEffect(() => {
-    timerRef.current = setInterval(() => {
-      setStats((s) => ({ ...s, minutes: s.minutes + 1 }));
-    }, 60000);
-    return () => clearInterval(timerRef.current);
-  }, []);
+    if (courseId) loadModules();
+  }, [courseId]);
 
   // Scroll to bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, streaming]);
+  }, [messages]);
 
-  // Load course modules
-  useEffect(() => {
-    if (!courseId) return;
-    assign.getCourse(courseId).then((course) => {
-      setCourseName(course.title || course.name || "My Course");
-    }).catch(() => {});
-    assign.getCourseGraph(courseId).then((graph) => {
-      const mods: CourseModule[] = (graph.nodes || []).map((n: { id: string; data?: { label?: string } }) => ({
-        module_id: n.id,
-        title: n.data?.label || n.id,
-        progress: 0,
-      }));
-      setModules(mods);
-      if (mods.length > 0 && !activeModule) {
-        setActiveModule(mods[0]);
-      }
-    }).catch(() => {});
-  }, [courseId]);
+  async function loadModules() {
+    try {
+      const res = await fetch(`${ASSIGN_URL}/api/courses/${courseId}`);
+      const data = await res.json();
+      setModules(data.modules || []);
+    } catch {}
+  }
 
-  // Start session when module changes
-  useEffect(() => {
-    if (!activeModule) return;
-    const studentId = localStorage.getItem("studentId") || "demo-student";
-    setSessionId(null);
-    setMastery(0);
-    assign.startSession(activeModule.module_id, studentId).then((res) => {
-      setSessionId(res.session_id);
-      // Stream initial explanation
-      setStreaming(true);
-      let fullText = "";
-      streamExplanation(
-        res.session_id,
-        "initial",
-        (token) => {
-          fullText += token;
-          setChatsByModule((prev) => {
-            const msgs = prev[activeModule.module_id] || [];
-            const last = msgs[msgs.length - 1];
-            if (last && last.role === "ai" && !last.chips) {
-              return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, text: fullText }] };
-            }
-            return { ...prev, [activeModule.module_id]: [...msgs, { role: "ai", text: fullText }] };
-          });
-        },
-        () => {
-          setStreaming(false);
-          setChatsByModule((prev) => {
-            const msgs = prev[activeModule.module_id] || [];
-            const last = msgs[msgs.length - 1];
-            if (last && last.role === "ai") {
-              return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, chips: CHIPS }] };
-            }
-            return prev;
-          });
-          if (ttsEnabled && fullText) speak(fullText);
-        }
-      ).catch(() => {
-        setStreaming(false);
-        addMessage(activeModule.module_id, {
-          role: "ai",
-          text: `Let's learn about **${activeModule.title}**. What do you already know about this topic?`,
-          chips: CHIPS,
-        });
-      });
-    }).catch(() => {
-      addMessage(activeModule.module_id, {
-        role: "ai",
-        text: `Let's learn about **${activeModule.title}**. What do you already know about this topic?`,
-        chips: CHIPS,
-      });
-    });
-  }, [activeModule?.module_id]);
+  // ── Upload flow ──────────────────────────────────────────────
+  async function handleUpload() {
+    if (!uploadFiles.length || !courseTitle) return;
+    setUploadStatus("uploading");
+    setUploadMessage("Uploading documents...");
 
-  const addMessage = useCallback((moduleId: string, msg: Message) => {
-    setChatsByModule((prev) => ({
-      ...prev,
-      [moduleId]: [...(prev[moduleId] || []), msg],
-    }));
-  }, []);
+    const formData = new FormData();
+    uploadFiles.forEach(f => formData.append("file", f));
+    formData.append("course_title", courseTitle);
+    formData.append("professor_email", professorEmail || "student@demo.com");
 
-  // Voice: TTS
-  const speak = (text: string) => {
-    if (!ttsEnabled || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text.replace(/[*#_`]/g, ""));
-    utterance.rate = 1.0;
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    window.speechSynthesis.speak(utterance);
-  };
+    try {
+      const res = await fetch(`${ASSIGN_URL}/api/ingest`, { method: "POST", body: formData });
+      const { course_id } = await res.json();
+      localStorage.setItem("assign_course_id", course_id);
+      localStorage.setItem("assign_student_email", professorEmail || "student@demo.com");
 
-  // Voice: STT
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
-      return;
+      setUploadStatus("processing");
+      setUploadMessage("Generating course structure...");
+
+      // Poll status
+      const messages = ["Parsing documents...", "Generating modules...", "Running quality checks...", "Almost ready..."];
+      let msgIdx = 0;
+      const poll = setInterval(async () => {
+        setUploadMessage(messages[msgIdx % messages.length]);
+        msgIdx++;
+        try {
+          const s = await fetch(`${ASSIGN_URL}/api/ingest/${course_id}/status`).then(r => r.json());
+          if (s.status === "ready") {
+            clearInterval(poll);
+            setUploadStatus("done");
+            setShowUploadDialog(false);
+            setUploadStatus("idle");
+            // Enroll student
+            await enrollStudent(course_id);
+            loadModulesForCourse(course_id);
+          }
+        } catch {}
+      }, 3000);
+    } catch {
+      setUploadStatus("idle");
+      setUploadMessage("Upload failed. Try again.");
     }
-    const SpeechRecognition = (window as unknown as { SpeechRecognition?: typeof window.SpeechRecognition; webkitSpeechRecognition?: typeof window.SpeechRecognition }).SpeechRecognition || (window as unknown as { webkitSpeechRecognition?: typeof window.SpeechRecognition }).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = "en-US";
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results[0]?.[0]?.transcript;
-      if (transcript) setInput(transcript);
-    };
-    recognition.onend = () => setIsListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsListening(true);
-  };
+  }
 
-  const handleChip = (chip: string) => {
-    if (!activeModule || !sessionId) return;
-    addMessage(activeModule.module_id, { role: "user", text: chip });
-    setStats((s) => ({ ...s, questions: s.questions + 1 }));
+  async function loadModulesForCourse(cid: string) {
+    const res = await fetch(`${ASSIGN_URL}/api/courses/${cid}`);
+    const data = await res.json();
+    setModules(data.modules || []);
+  }
+
+  async function enrollStudent(cid: string) {
+    if (localStorage.getItem("assign_student_id")) return;
+    const email = localStorage.getItem("assign_student_email") || "student@demo.com";
+    const res = await fetch(`${ASSIGN_URL}/api/courses/${cid}/enroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, name: email.split("@")[0] }),
+    });
+    const data = await res.json();
+    if (data.student_id) localStorage.setItem("assign_student_id", data.student_id);
+  }
+
+  // ── Module selection → prereq check → teach ─────────────────
+  async function handleSelectModule(mod: Module) {
+    setSelectedModule(mod);
+    setMessages([]);
+    setStrategyIndex(0);
+    setSessionId(null);
+
+    // Ensure enrolled
+    if (!studentId && courseId) await enrollStudent(courseId);
+
+    // Prerequisite check
+    try {
+      const assessments: Assessment[] = await fetch(
+        `${ASSIGN_URL}/api/courses/${courseId}/modules/${mod.id}/assessments`
+      ).then(r => r.json());
+      const recallQs = assessments.filter(a => a.difficulty_tier === "recall").slice(0, 2);
+
+      if (recallQs.length > 0) {
+        addAIMessage(
+          `Before we dive into **${mod.title}**, let me check your foundation with ${recallQs.length} quick question${recallQs.length > 1 ? "s" : ""}:`,
+          []
+        );
+        await runPrereqQuiz(recallQs, mod);
+      } else {
+        startTeaching(mod, "initial");
+      }
+    } catch {
+      startTeaching(mod, "initial");
+    }
+  }
+
+  async function runPrereqQuiz(questions: Assessment[], mod: Module) {
+    let correct = 0;
+    for (const q of questions) {
+      const chips = q.options || ["True", "False"];
+      const answer = await askQuizQuestion(q.question, chips);
+      if (answer === q.correct_answer || q.correct_answer.startsWith(answer.charAt(0))) correct++;
+    }
+    if (correct >= 1) {
+      addAIMessage("Great foundation! Let's build on that. 🎯", []);
+      setTimeout(() => startTeaching(mod, "initial"), 600);
+    } else {
+      addAIMessage("Let's start from the fundamentals — I'll make this clear. 💡", []);
+      setTimeout(() => startTeaching(mod, "simplified"), 600);
+    }
+  }
+
+  function askQuizQuestion(question: string, chips: string[]): Promise<string> {
+    return new Promise(resolve => {
+      addAIMessage(question, chips, (answer) => resolve(answer));
+    });
+  }
+
+  function addAIMessage(text: string, chips: string[] = [], onChip?: (c: string) => void) {
+    const msg: Message & { onChip?: (c: string) => void } = {
+      role: "ai", text, chips,
+    };
+    setMessages(prev => [...prev, msg]);
+    if (voiceOn) speak(text);
+  }
+
+  // ── Teaching loop ────────────────────────────────────────────
+  async function startTeaching(mod: Module, strategy: string) {
+    const sId = localStorage.getItem("assign_student_id") || "";
+    if (!sId || !mod.id) return;
+
+    try {
+      const { session_id } = await fetch(`${ASSIGN_URL}/api/teach/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ module_id: mod.id, student_id: sId }),
+      }).then(r => r.json());
+      setSessionId(session_id);
+      await streamTeaching(session_id, strategy);
+    } catch (e) {
+      addAIMessage("Having trouble connecting. Please try again.", []);
+    }
+  }
+
+  async function streamTeaching(sId: string, strategy: string) {
+    setIsStreaming(true);
+    // Add empty streaming bubble
+    setMessages(prev => [...prev, { role: "ai", text: "", streaming: true }]);
+
+    let fullText = "";
+    try {
+      const res = await fetch(`${ASSIGN_URL}/api/teach/${sId}/explain?strategy=${strategy}`);
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const ev = JSON.parse(line.slice(6));
+              if (ev.token) {
+                fullText += ev.token;
+                setMessages(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last?.streaming) return [...prev.slice(0, -1), { ...last, text: fullText }];
+                  return prev;
+                });
+              }
+              if (ev.done) break;
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+
+    // Mark streaming done, add chips
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last?.streaming) {
+        return [...prev.slice(0, -1), {
+          ...last, streaming: false,
+          chips: ["I understand ✓", "Give me a hint 💡", "Show an example 📝", "I don't know 🤷"]
+        }];
+      }
+      return prev;
+    });
+    setIsStreaming(false);
+    if (voiceOn && fullText) speak(fullText);
+  }
+
+  async function handleChip(chip: string) {
+    // Remove chips from last message
+    setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, chips: [] } : m));
+    setMessages(prev => [...prev, { role: "user", text: chip }]);
 
     if (chip.startsWith("I understand")) {
-      // Submit understanding
-      assign.submitExplanation(sessionId, "I understand this concept.").then((res) => {
-        const score = res.mastery ?? res.score ?? mastery + 15;
-        setMastery(Math.min(100, score));
-        addMessage(activeModule.module_id, {
-          role: "ai",
-          text: `Great! Your mastery is now at ${Math.min(100, score)}%. ${score >= 80 ? "You're doing amazing!" : "Keep going!"}`,
-          chips: score >= 80 ? [] : CHIPS,
-        });
-      }).catch(() => {
-        setMastery((m) => Math.min(100, m + 10));
-        addMessage(activeModule.module_id, { role: "ai", text: "Nice work! Let's keep going.", chips: CHIPS });
-      });
+      await submitExplanation("I understand this concept well and can explain it.");
     } else if (chip.startsWith("Give me a hint")) {
-      setStreaming(true);
-      let fullText = "";
-      streamExplanation(sessionId, "simplified", (token) => {
-        fullText += token;
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai" && !last.chips) {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, text: fullText }] };
-          }
-          return { ...prev, [activeModule.module_id]: [...msgs, { role: "ai", text: fullText }] };
-        });
-      }, () => {
-        setStreaming(false);
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai") {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, chips: CHIPS }] };
-          }
-          return prev;
-        });
-        if (ttsEnabled && fullText) speak(fullText);
-      }).catch(() => {
-        setStreaming(false);
-        addMessage(activeModule.module_id, { role: "ai", text: "Here's a simpler way to think about it...", chips: CHIPS });
-      });
+      setStrategyIndex(1);
+      if (selectedModule) startTeaching(selectedModule, "simplified");
     } else if (chip.startsWith("Show an example")) {
-      setStreaming(true);
-      let fullText = "";
-      streamExplanation(sessionId, "worked_example", (token) => {
-        fullText += token;
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai" && !last.chips) {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, text: fullText }] };
-          }
-          return { ...prev, [activeModule.module_id]: [...msgs, { role: "ai", text: fullText }] };
-        });
-      }, () => {
-        setStreaming(false);
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai") {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, chips: CHIPS }] };
-          }
-          return prev;
-        });
-        if (ttsEnabled && fullText) speak(fullText);
-      }).catch(() => {
-        setStreaming(false);
-        addMessage(activeModule.module_id, { role: "ai", text: "Let me walk through an example...", chips: CHIPS });
-      });
-    } else {
-      // "I don't know"
-      setStreaming(true);
-      let fullText = "";
-      streamExplanation(sessionId, "analogy", (token) => {
-        fullText += token;
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai" && !last.chips) {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, text: fullText }] };
-          }
-          return { ...prev, [activeModule.module_id]: [...msgs, { role: "ai", text: fullText }] };
-        });
-      }, () => {
-        setStreaming(false);
-        setChatsByModule((prev) => {
-          const msgs = prev[activeModule.module_id] || [];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "ai") {
-            return { ...prev, [activeModule.module_id]: [...msgs.slice(0, -1), { ...last, chips: CHIPS }] };
-          }
-          return prev;
-        });
-        if (ttsEnabled && fullText) speak(fullText);
-      }).catch(() => {
-        setStreaming(false);
-        addMessage(activeModule.module_id, { role: "ai", text: "No worries! Let me explain this differently...", chips: CHIPS });
-      });
+      setStrategyIndex(2);
+      if (selectedModule) startTeaching(selectedModule, "worked_example");
+    } else if (chip.startsWith("I don't know")) {
+      setStrategyIndex(3);
+      if (selectedModule) startTeaching(selectedModule, "analogy");
     }
-  };
+  }
 
-  const handleSend = () => {
-    if (!input.trim() || !activeModule || !sessionId) return;
-    const text = input.trim();
-    setInput("");
-    addMessage(activeModule.module_id, { role: "user", text });
-    setStats((s) => ({ ...s, questions: s.questions + 1 }));
+  async function submitExplanation(text: string) {
+    if (!sessionId) return;
+    try {
+      const result = await fetch(`${ASSIGN_URL}/api/teach/${sessionId}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ explanation: text }),
+      }).then(r => r.json());
 
-    assign.submitExplanation(sessionId, text).then((res) => {
-      const score = res.mastery ?? res.score ?? mastery;
-      setMastery(Math.min(100, score));
-      const aiText = res.feedback || res.message || "Good thinking — keep going!";
-      addMessage(activeModule.module_id, { role: "ai", text: aiText, chips: CHIPS });
-      if (ttsEnabled) speak(aiText);
-    }).catch(() => {
-      addMessage(activeModule.module_id, { role: "ai", text: "Good thinking — keep going!", chips: CHIPS });
-    });
-  };
+      const mastery = Math.round((result.mastery_probability || 0) * 100);
+      const overall = Math.round((result.overall_score || 0) * 100);
+      const feedback = result.feedback || "Keep it up!";
 
-  const handleJoinCourse = () => {
-    if (!joinCourseId.trim()) return;
-    setCourseId(joinCourseId.trim());
-    localStorage.setItem("studentCourseId", joinCourseId.trim());
-    setJoinDialogOpen(false);
-    setJoinCourseId("");
-  };
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: feedback,
+        mastery,
+        scores: result.scores,
+      }]);
 
-  const switchModule = (mod: CourseModule) => {
-    setActiveModule(mod);
-    setSidebarOpen(false);
-    setStats((s) => ({ ...s, concepts: Math.min(modules.length, s.concepts + 1) }));
-  };
+      if (result.advance) {
+        setModules(prev => prev.map(m =>
+          m.id === selectedModule?.id ? { ...m, mastery: 100, completed: true } : m
+        ));
+        setOverallMastery(prev => Math.min(100, prev + Math.round(100 / modules.length)));
+        setTimeout(() => addAIMessage("✓ Module complete! Great work. 🎉 Select the next module when you're ready.", []), 500);
+      } else if (overall < 30) {
+        const nextStrategy = STRATEGIES[Math.min(strategyIndex + 1, STRATEGIES.length - 1)];
+        setStrategyIndex(s => Math.min(s + 1, STRATEGIES.length - 1));
+        if (strategyIndex >= 3) {
+          addAIMessage("This is a tough concept — I've flagged this for your instructor. You can move to the next module and come back to this. 📌", []);
+        } else {
+          setTimeout(() => {
+            addAIMessage("Let me try a different approach... 🔄", []);
+            setTimeout(() => selectedModule && startTeaching(selectedModule, nextStrategy), 600);
+          }, 500);
+        }
+      } else {
+        setTimeout(() => addAIMessage("Good effort! Want to try explaining again or move on?",
+          ["Try again 🔄", "Next module →"]), 500);
+      }
+    } catch {
+      addAIMessage("Couldn't submit. Try again.", []);
+    }
+  }
 
-  const Sidebar = () => (
-    <div className="flex flex-col h-full">
-      <div className="px-4 pt-5 pb-3 border-b border-border">
-        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Course</p>
-        <p className="font-serif text-foreground text-lg mt-1">{courseName}</p>
-      </div>
-      <div className="flex-1 overflow-y-auto px-2 py-3">
-        {modules.length === 0 && !courseId ? (
-          <div className="px-3 py-4 text-center">
-            <p className="text-sm text-muted-foreground mb-3">No course joined yet</p>
-            <button
-              onClick={() => setJoinDialogOpen(true)}
-              className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-            >
-              Join a Course
-            </button>
-          </div>
-        ) : (
-          <>
-            <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider px-2 mb-2">Topics</p>
-            {modules.map((mod) => (
-              <button
-                key={mod.module_id}
-                onClick={() => switchModule(mod)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  activeModule?.module_id === mod.module_id
-                    ? "bg-primary/10 text-primary border-l-2 border-primary font-medium"
-                    : "text-foreground hover:bg-muted"
-                }`}
-              >
-                {mod.title}
-              </button>
-            ))}
+  async function handleSend() {
+    const text = inputText.trim();
+    if (!text || isStreaming) return;
+    setInputText("");
+    setMessages(prev => [...prev, { role: "user", text }]);
 
-            {/* Mastery progress */}
-            <div className="mt-6 px-2">
-              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-3">Mastery</p>
-              <div className="mb-3">
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-foreground">{activeModule?.title || "—"}</span>
-                  <span className="text-muted-foreground">{mastery}%</span>
-                </div>
-                <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-700 ${progressColor(mastery)}`}
-                    style={{ width: `${mastery}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+    if (!sessionId && selectedModule) {
+      await startTeaching(selectedModule, STRATEGIES[strategyIndex]);
+    } else {
+      await submitExplanation(text);
+    }
+  }
 
-        {/* Quick nav links */}
-        <div className="px-2 mt-4 pt-4 border-t border-border space-y-1">
-          <button
-            onClick={() => navigate("/student/progress")}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          >
-            <Star className="w-4 h-4" /> My Progress
-          </button>
-          <button
-            onClick={() => navigate("/student/leaderboard")}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          >
-            <Trophy className="w-4 h-4" /> Leaderboard
-          </button>
-        </div>
+  // ── Voice ────────────────────────────────────────────────────
+  function speak(text: string) {
+    if (!voiceOn) return;
+    window.speechSynthesis?.cancel();
+    const utt = new SpeechSynthesisUtterance(text.replace(/\*\*/g, ""));
+    utt.rate = 1.1;
+    const voices = window.speechSynthesis?.getVoices() || [];
+    const v = voices.find(v => v.name.includes("Google") && v.lang === "en-US") || voices.find(v => v.lang === "en-US");
+    if (v) utt.voice = v;
+    window.speechSynthesis?.speak(utt);
+  }
 
-        {/* Streak widget */}
-        <div className="mx-2 mt-3 mb-2 p-3 rounded-lg bg-orange-50 border border-orange-100">
-          <div className="flex items-center gap-2">
-            <Flame className="w-4 h-4 text-orange-500" />
-            <span className="text-xs font-medium text-orange-700">4 day streak!</span>
-          </div>
-          <p className="text-xs text-orange-600 mt-0.5">Come back tomorrow to keep it going.</p>
-        </div>
-      </div>
-    </div>
-  );
+  function toggleMic() {
+    if (micOn) {
+      recognitionRef.current?.stop();
+      setMicOn(false);
+      return;
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+    rec.onresult = (e: any) => {
+      const t = Array.from(e.results).map((r: any) => r[0].transcript).join("");
+      setInputText(t);
+    };
+    rec.onend = () => {
+      setMicOn(false);
+      if (inputText.trim()) handleSend();
+    };
+    rec.start();
+    recognitionRef.current = rec;
+    setMicOn(true);
+  }
 
+  // ── Faithfulness color ────────────────────────────────────────
+  function faithColor(v: string | null) {
+    if (v === "FAITHFUL") return "bg-green-500";
+    if (v === "PARTIAL") return "bg-yellow-400";
+    if (v === "UNFAITHFUL") return "bg-red-500";
+    return "bg-gray-300";
+  }
+
+  // ── Render ────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-background flex flex-col md:flex-row">
-      {/* Mobile header */}
-      <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-border bg-card">
-        <button onClick={() => navigate("/roles")} className="text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="w-5 h-5" />
-        </button>
-        <span className="font-serif text-foreground">{courseName}</span>
-        <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-muted-foreground">
-          {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-        </button>
-      </div>
-
-      {/* Mobile sidebar dropdown */}
-      {sidebarOpen && (
-        <div className="md:hidden border-b border-border bg-card">
-          <Sidebar />
-        </div>
-      )}
-
-      {/* Desktop sidebar */}
-      <aside className="hidden md:block w-[220px] border-r border-border bg-card flex-shrink-0 h-screen sticky top-0">
-        <button
-          onClick={() => navigate("/roles")}
-          className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground hover:text-foreground border-b border-border w-full"
-        >
+    <div className="flex h-screen bg-background font-sans">
+      {/* Sidebar */}
+      <aside className="w-44 shrink-0 border-r border-border flex flex-col py-4 px-3 gap-3">
+        <button onClick={() => navigate("/")} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="w-4 h-4" /> Back
         </button>
-        <Sidebar />
-      </aside>
 
-      {/* Chat area */}
-      <main className="flex-1 flex flex-col h-screen md:h-screen">
-        {/* Chat header */}
-        <div className="px-5 py-4 border-b border-border bg-card flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-bold text-sm">
-            A
+        <div>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-0.5">Course</p>
+          <p className="text-sm font-semibold text-foreground truncate">
+            {modules.length > 0 ? "My Course" : "No course loaded"}
+          </p>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Topics</p>
+          {modules.length === 0 ? (
+            <button
+              onClick={() => setShowUploadDialog(true)}
+              className="w-full text-left text-xs text-primary font-medium py-2 px-2 rounded-lg border border-primary/30 hover:bg-primary/5 flex items-center gap-1.5"
+            >
+              <Upload className="w-3 h-3" /> Upload Materials
+            </button>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {modules.map(mod => (
+                <button
+                  key={mod.id}
+                  onClick={() => handleSelectModule(mod)}
+                  className={`w-full text-left px-2 py-1.5 rounded-lg text-xs transition-colors flex items-start gap-1.5 ${
+                    selectedModule?.id === mod.id
+                      ? "bg-primary/10 text-primary font-medium"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                >
+                  <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${faithColor(mod.faithfulness_verdict)}`} />
+                  <span className="leading-tight">{mod.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div className="flex justify-between items-center mb-1">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Mastery</p>
+            <p className="text-[10px] text-muted-foreground">{overallMastery}%</p>
           </div>
-          <div className="flex-1">
-            <p className="text-sm font-medium text-foreground">Assign Tutor</p>
-            <p className="text-xs text-muted-foreground">{activeModule?.title || "Select a topic"}</p>
-          </div>
-          {/* Mastery badge */}
-          <div className="flex items-center gap-1.5">
-            <Star className="w-4 h-4 text-primary" />
-            <span className="text-sm font-medium text-primary">{mastery}%</span>
-          </div>
-          {/* TTS toggle */}
-          <button
-            onClick={() => { setTtsEnabled(!ttsEnabled); if (isSpeaking) window.speechSynthesis.cancel(); }}
-            className={`p-2 rounded-lg transition-colors ${ttsEnabled ? "text-primary bg-primary/10" : "text-muted-foreground hover:bg-muted"}`}
-            title={ttsEnabled ? "Mute voice" : "Enable voice"}
-          >
-            {ttsEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          <Progress value={overallMastery} className="h-1.5" />
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <button onClick={() => navigate("/student/progress")} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground py-1">
+            <Star className="w-3.5 h-3.5" /> My Progress
+          </button>
+          <button onClick={() => navigate("/student/leaderboard")} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground py-1">
+            <Trophy className="w-3.5 h-3.5" /> Leaderboard
           </button>
         </div>
 
+        <div className="rounded-lg bg-orange-50 border border-orange-100 p-2">
+          <div className="flex items-center gap-1 text-orange-500 text-xs font-medium mb-0.5">
+            <Flame className="w-3 h-3" /> 4 day streak!
+          </div>
+          <p className="text-[10px] text-orange-400">Come back tomorrow to keep it going.</p>
+        </div>
+      </aside>
+
+      {/* Main chat */}
+      <main className="flex-1 flex flex-col min-w-0">
+        {/* Header */}
+        <header className="h-12 border-b border-border flex items-center justify-between px-4 shrink-0">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-full bg-primary flex items-center justify-center text-white text-xs font-bold">A</div>
+            <div>
+              <p className="text-sm font-medium leading-none">Assign Tutor</p>
+              <p className="text-[11px] text-muted-foreground">{selectedModule?.title || "Select a topic"}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+              <Star className="w-3.5 h-3.5 text-yellow-400" /> {overallMastery}%
+            </span>
+            <button onClick={() => setVoiceOn(v => !v)} className="text-muted-foreground hover:text-foreground">
+              {voiceOn ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            </button>
+          </div>
+        </header>
+
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+          {messages.length === 0 && !selectedModule && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center">
+              <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
+                <Upload className="w-6 h-6 text-primary" />
+              </div>
+              <div>
+                <p className="font-semibold text-foreground mb-1">Upload your course materials</p>
+                <p className="text-sm text-muted-foreground mb-4">Upload PDFs, slide decks, or notes and Assign will build you a personalized learning path.</p>
+                <Button onClick={() => setShowUploadDialog(true)} className="bg-primary text-white hover:bg-primary/90">
+                  <Upload className="w-4 h-4 mr-2" /> Upload Materials
+                </Button>
+              </div>
+            </div>
+          )}
+
           {messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className="max-w-[85%] md:max-w-[70%]">
-                <div
-                  className={`px-4 py-3 rounded-xl text-sm leading-relaxed ${
-                    msg.role === "ai"
-                      ? "bg-muted text-foreground rounded-bl-sm"
-                      : "bg-foreground text-background rounded-br-sm"
-                  }`}
-                >
-                  {msg.text}
+            <div key={i} className={`flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
+              <div className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                msg.role === "ai"
+                  ? "bg-card border border-border text-foreground"
+                  : "bg-primary text-white"
+              }`}>
+                {msg.text}
+                {msg.streaming && <span className="inline-block w-1.5 h-4 bg-primary/60 ml-1 animate-pulse rounded" />}
+              </div>
+
+              {/* Mastery feedback */}
+              {msg.mastery !== undefined && (
+                <div className="max-w-[75%] bg-muted rounded-xl px-4 py-2 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">Mastery</span>
+                    <span className={`font-bold ${msg.mastery >= 70 ? "text-green-600" : msg.mastery >= 40 ? "text-yellow-600" : "text-red-600"}`}>
+                      {msg.mastery}%
+                    </span>
+                  </div>
+                  <div className={`h-1.5 rounded-full w-full bg-muted-foreground/20`}>
+                    <div
+                      className={`h-full rounded-full transition-all ${msg.mastery >= 70 ? "bg-green-500" : msg.mastery >= 40 ? "bg-yellow-400" : "bg-red-500"}`}
+                      style={{ width: `${msg.mastery}%` }}
+                    />
+                  </div>
+                  {msg.scores && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {Object.entries(msg.scores).map(([k, v]) => (
+                        <span key={k} className="bg-background border border-border rounded px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          {k.replace(/_/g, " ")}: {Math.round((v as number) * 100)}%
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                {msg.role === "ai" && msg.chips && msg.chips.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {msg.chips.map((chip) => (
-                      <button
-                        key={chip}
-                        onClick={() => handleChip(chip)}
-                        disabled={streaming}
-                        className="px-3 py-1.5 text-xs rounded-full border border-primary/30 text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
-                      >
-                        {chip}
-                      </button>
+              )}
+
+              {/* Chips */}
+              {msg.chips && msg.chips.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 max-w-[75%]">
+                  {msg.chips.map(chip => (
+                    <button
+                      key={chip}
+                      onClick={() => handleChip(chip)}
+                      disabled={isStreaming}
+                      className="text-xs px-3 py-1.5 rounded-full border border-primary/30 text-primary bg-primary/5 hover:bg-primary/10 transition-colors disabled:opacity-50"
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <div ref={chatEndRef} />
+        </div>
+
+        {/* Input bar */}
+        <footer className="border-t border-border px-4 py-3 flex items-center gap-2 shrink-0">
+          {(window as any).SpeechRecognition || (window as any).webkitSpeechRecognition ? (
+            <button
+              onClick={toggleMic}
+              className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors shrink-0 ${
+                micOn ? "bg-red-500 text-white animate-pulse" : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {micOn ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
+          ) : null}
+          <input
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && !e.shiftKey && handleSend()}
+            placeholder={selectedModule ? "Explain it back in your own words..." : "Select a topic to start learning..."}
+            disabled={!selectedModule || isStreaming}
+            className="flex-1 bg-muted rounded-full px-4 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
+          />
+          <button
+            onClick={handleSend}
+            disabled={!inputText.trim() || isStreaming || !selectedModule}
+            className="w-9 h-9 rounded-full bg-primary flex items-center justify-center text-white disabled:opacity-40 hover:bg-primary/90 transition-colors shrink-0"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </footer>
+
+        {/* Session stats footer */}
+        <div className="px-4 py-1.5 text-[10px] text-muted-foreground flex gap-3 border-t border-border/50">
+          <span>Session: 0 min</span>
+          <span>·</span>
+          <span>Modules touched: {messages.filter(m => m.role === "user").length}</span>
+        </div>
+      </main>
+
+      {/* Upload Dialog */}
+      <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Upload Course Materials</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div>
+              <label className="text-sm font-medium mb-1.5 block">Course Materials</label>
+              <div className="border-2 border-dashed border-border rounded-lg p-4 text-center">
+                <input
+                  type="file"
+                  multiple
+                  accept=".pdf,.docx,.pptx"
+                  onChange={e => setUploadFiles(Array.from(e.target.files || []))}
+                  className="hidden"
+                  id="file-upload"
+                />
+                <label htmlFor="file-upload" className="cursor-pointer">
+                  <Upload className="w-6 h-6 text-muted-foreground mx-auto mb-2" />
+                  <p className="text-sm text-muted-foreground">Click to upload PDF, DOCX, PPTX</p>
+                </label>
+                {uploadFiles.length > 0 && (
+                  <div className="mt-3 space-y-1">
+                    {uploadFiles.map((f, i) => (
+                      <div key={i} className="flex items-center justify-between text-xs bg-muted rounded px-2 py-1">
+                        <span className="truncate">{f.name}</span>
+                        <button onClick={() => setUploadFiles(prev => prev.filter((_, j) => j !== i))}>
+                          <X className="w-3 h-3 text-muted-foreground" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 )}
               </div>
             </div>
-          ))}
-          {streaming && (
-            <div className="flex justify-start">
-              <div className="px-4 py-3 rounded-xl bg-muted text-foreground text-sm rounded-bl-sm">
-                <span className="animate-pulse">...</span>
-              </div>
+            <div>
+              <label className="text-sm font-medium mb-1.5 block">Course Title</label>
+              <Input value={courseTitle} onChange={e => setCourseTitle(e.target.value)} placeholder="e.g. Machine Learning Fundamentals" />
             </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
+            <div>
+              <label className="text-sm font-medium mb-1.5 block">Your Email</label>
+              <Input value={professorEmail} onChange={e => setProfessorEmail(e.target.value)} placeholder="you@example.com" />
+            </div>
 
-        {/* Input */}
-        <div className="px-4 md:px-8 py-3 border-t border-border bg-card">
-          <div className="flex gap-2">
-            <button
-              onClick={toggleListening}
-              className={`px-3 py-2.5 rounded-lg border transition-colors ${
-                isListening
-                  ? "bg-destructive text-destructive-foreground border-destructive"
-                  : "border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-              }`}
-              title={isListening ? "Stop listening" : "Start voice input"}
-            >
-              {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-            </button>
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSend()}
-              placeholder="Type your answer…"
-              className="flex-1 px-4 py-2.5 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-            />
-            <button
-              onClick={handleSend}
-              disabled={streaming || !input.trim()}
-              className="px-4 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+            {uploadStatus !== "idle" && (
+              <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 text-sm text-primary flex items-center gap-2">
+                <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
+                {uploadMessage}
+              </div>
+            )}
 
-        {/* Session stats */}
-        <div className="px-4 md:px-8 py-2 border-t border-border bg-muted/50 flex gap-4 text-xs text-muted-foreground">
-          <span>Session: {stats.minutes} min</span>
-          <span>·</span>
-          <span>Questions asked: {stats.questions}</span>
-          <span>·</span>
-          <span>Concepts touched: {stats.concepts}</span>
-        </div>
-      </main>
-
-      {/* Join Course Dialog */}
-      <Dialog open={joinDialogOpen} onOpenChange={setJoinDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="font-serif">Join a Course</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <label className="block text-sm font-medium text-foreground">Course ID</label>
-            <input
-              type="text"
-              value={joinCourseId}
-              onChange={(e) => setJoinCourseId(e.target.value)}
-              placeholder="Enter course ID or join link..."
-              className="w-full px-3 py-2.5 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-            />
-            <button
-              onClick={handleJoinCourse}
-              className="w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            <Button
+              onClick={handleUpload}
+              disabled={!uploadFiles.length || !courseTitle || uploadStatus !== "idle"}
+              className="w-full bg-primary text-white hover:bg-primary/90"
             >
-              Join
-            </button>
+              {uploadStatus === "idle" ? "Generate Course" : "Processing..."}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
     </div>
   );
-};
-
-export default StudentApp;
+}
