@@ -27,7 +27,7 @@ Return JSON:
 verdict must be FAITHFUL, PARTIAL, or UNFAITHFUL."""
 
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="llama-3.1-8b-instant",  # GROQ_FAITH_MODEL
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         response_format={"type": "json_object"},
