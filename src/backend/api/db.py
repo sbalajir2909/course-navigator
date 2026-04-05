@@ -5,13 +5,23 @@ All routes import supabase_query from here.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Optional
 
 import httpx
 from fastapi import HTTPException
 
-_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+_supabase_client: httpx.AsyncClient | None = None
+
+
+def get_supabase_client() -> httpx.AsyncClient:
+    global _supabase_client
+    if _supabase_client is None or _supabase_client.is_closed:
+        _supabase_client = httpx.AsyncClient(timeout=_TIMEOUT)
+    return _supabase_client
 
 
 def _get_headers() -> dict[str, str]:
@@ -59,8 +69,9 @@ async def supabase_query(
 
     url = f"{_get_url()}/{table}"
 
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+    client = get_supabase_client()
+    for attempt in range(3):
+        try:
             resp = await client.request(
                 method,
                 url,
@@ -73,8 +84,10 @@ async def supabase_query(
             if resp.status_code == 204 or not resp.content:
                 return []
             return resp.json()
-    except (httpx.ReadTimeout, httpx.ConnectTimeout):
-        raise HTTPException(status_code=503, detail="Database timeout — please retry")
+        except (httpx.ReadTimeout, httpx.ConnectTimeout):
+            if attempt == 2:
+                raise HTTPException(status_code=503, detail="Database timeout — please retry")
+            await asyncio.sleep(1)
 
 
 async def supabase_rpc(
@@ -100,12 +113,15 @@ async def supabase_rpc(
     base = os.getenv("SUPABASE_URL", "").rstrip("/")
     url = f"{base}/rest/v1/rpc/{function_name}"
 
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+    client = get_supabase_client()
+    for attempt in range(3):
+        try:
             resp = await client.post(url, headers=headers, json=params or {})
             resp.raise_for_status()
             if resp.status_code == 204 or not resp.content:
                 return None
             return resp.json()
-    except (httpx.ReadTimeout, httpx.ConnectTimeout):
-        raise HTTPException(status_code=503, detail="Database timeout — please retry")
+        except (httpx.ReadTimeout, httpx.ConnectTimeout):
+            if attempt == 2:
+                raise HTTPException(status_code=503, detail="Database timeout — please retry")
+            await asyncio.sleep(1)
