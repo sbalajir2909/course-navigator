@@ -113,14 +113,14 @@ Return ONLY this JSON (no markdown, no preamble):
         from groq import Groq
         gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
         gr = gclient.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",  # GROQ_VALIDATE_MODEL
             messages=[
                 {"role": "system", "content": "You are a fair, encouraging educator. Find evidence of understanding, not gaps. Return only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
             response_format={"type": "json_object"},
-            max_tokens=300,
+            max_tokens=300,  # MAX_TOKENS_VALIDATE
         )
         result = json.loads(gr.choices[0].message.content)
         print(f"[VALIDATOR] Groq result: verdict={result.get('verdict')}, score={result.get('understanding_score')}")
@@ -135,7 +135,7 @@ Return ONLY this JSON (no markdown, no preamble):
                     {"role": "system", "content": "You are a fair educator. Find evidence of understanding. Return only valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=300,
+                max_tokens=300,  # MAX_TOKENS_VALIDATE
                 temperature=0.1,
                 response_format={"type": "json_object"},
             )
