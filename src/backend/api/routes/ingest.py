@@ -37,10 +37,10 @@ async def _run_ingest_pipeline(course_id, document_id, file_bytes, filename, chu
             chunk_id_map[chunk["chunk_index"]] = cid
             await supabase_query("chunks", method="POST", json={
                 "id": cid,
-                "document_id": document_id,
+                "course_id": course_id,
                 "content": chunk["content"],
                 "chunk_index": chunk["chunk_index"],
-                "metadata": {"token_count": chunk["token_count"]}
+                "source_document_id": document_id,
             })
 
         course_rows = await supabase_query("courses", params={"id": f"eq.{course_id}", "select": "title"})
