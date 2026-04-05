@@ -137,7 +137,7 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
 
     try:
         resp = gclient.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=messages,
             max_tokens=250,
             temperature=0.4,
@@ -162,7 +162,7 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
         messages[-1]["content"] += "\n\nCRITICAL: Only teach what IS in the source. Never mention gaps or what the source doesn't cover."
         try:
             resp2 = gclient.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 max_tokens=250,
                 temperature=0.2,
