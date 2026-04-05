@@ -1,10 +1,9 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { useAuth } from "@/context/AuthContext";
-import { ApiError } from "@/lib/api";
+
+const API_BASE = "http://localhost:8000";
 
 const Login = () => {
-  const { login } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -16,21 +15,26 @@ const Login = () => {
     setError("");
     setLoading(true);
     try {
-      await login(email, password);
-      const stored = localStorage.getItem("assign_user");
-      const user = stored ? JSON.parse(stored) : null;
-      navigate(user?.role === "instructor" ? "/instructor" : "/student");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Login failed. Try again.");
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Login failed. Try again.");
+      }
+      // Persist auth data
+      localStorage.setItem("assign_token", data.token);
+      localStorage.setItem("assign_student_id", data.student_id);
+      localStorage.setItem("assign_name", data.name);
+      localStorage.setItem("assign_email", data.email);
+      navigate("/student");
+    } catch (err: any) {
+      setError(err.message || "Login failed. Try again.");
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleDemo = (role: "student" | "instructor") => {
-    localStorage.setItem("assign_token", "demo-token");
-    localStorage.setItem("assign_user", JSON.stringify({ userId: "demo", role, firstName: "Demo" }));
-    navigate(role === "instructor" ? "/instructor" : "/student");
   };
 
   return (
@@ -87,24 +91,6 @@ const Login = () => {
               Create one
             </Link>
           </p>
-
-          <div className="mt-5 pt-5 border-t border-border">
-            <p className="text-center text-xs text-muted-foreground mb-3">Or jump straight in →</p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => handleDemo("student")}
-                className="py-2 rounded-lg border border-border text-xs font-medium text-foreground hover:bg-muted transition-colors"
-              >
-                Demo as Student
-              </button>
-              <button
-                onClick={() => handleDemo("instructor")}
-                className="py-2 rounded-lg border border-border text-xs font-medium text-foreground hover:bg-muted transition-colors"
-              >
-                Demo as Instructor
-              </button>
-            </div>
-          </div>
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
