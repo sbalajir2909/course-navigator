@@ -113,8 +113,25 @@ export default function StudentApp() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // ── Auth: read token + student_id from localStorage ────────
+  const authToken = localStorage.getItem("assign_token") || "";
+  const storedStudentId = localStorage.getItem("assign_student_id") || "";
+
+  // Helper to build headers with auth token
+  function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    const headers: Record<string, string> = { ...extra };
+    if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+    return headers;
+  }
+
   // ── BUG 1 FIX: Clear all state on mount, fetch fresh ────────
   useEffect(() => {
+    // Redirect to login if no student_id
+    if (!storedStudentId) {
+      navigate("/login?role=student");
+      return;
+    }
+
     // Clear everything — no stale state
     setSelectedModule(null);
     setSessionId(null);
@@ -153,7 +170,9 @@ export default function StudentApp() {
 
   async function fetchModules(cid: string) {
     try {
-      const res = await fetch(`${ASSIGN_URL}/api/courses/${cid}`);
+      const res = await fetch(`${ASSIGN_URL}/api/courses/${cid}`, {
+        headers: authHeaders(),
+      });
       if (!res.ok) return;
       const data = await res.json();
       setModules(data.modules || []);
@@ -172,7 +191,7 @@ export default function StudentApp() {
     formData.append("professor_email", professorEmail || "student@demo.com");
 
     try {
-      const res = await fetch(`${ASSIGN_URL}/api/ingest`, { method: "POST", body: formData });
+      const res = await fetch(`${ASSIGN_URL}/api/ingest`, { method: "POST", body: formData, headers: authHeaders() });
       const { course_id } = await res.json();
       localStorage.setItem("assign_course_id", course_id);
       localStorage.setItem("assign_student_email", professorEmail || "student@demo.com");
@@ -208,7 +227,7 @@ export default function StudentApp() {
     try {
       const res = await fetch(`${ASSIGN_URL}/api/courses/${cid}/enroll`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ email, name: email.split("@")[0] }),
       });
       const data = await res.json();
@@ -244,7 +263,7 @@ export default function StudentApp() {
     try {
       const res = await fetch(`${ASSIGN_URL}/api/teach/start`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ module_id: mod.id, student_id: sId }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -254,7 +273,9 @@ export default function StudentApp() {
       if (data.current_concept_title) setCurrentConceptTitle(data.current_concept_title);
 
       // Fetch diagnostic questions
-      const aRes = await fetch(`${ASSIGN_URL}/api/courses/${courseId}/modules/${mod.id}/assessments`);
+      const aRes = await fetch(`${ASSIGN_URL}/api/courses/${courseId}/modules/${mod.id}/assessments`, {
+        headers: authHeaders(),
+      });
       const assessments: Assessment[] = aRes.ok ? await aRes.json() : [];
       const recallQs = assessments.filter(a => a.difficulty_tier === "recall").slice(0, 1);
 
@@ -295,7 +316,7 @@ export default function StudentApp() {
     try {
       const response = await fetch(`${ASSIGN_URL}/api/teach/${sessionId}/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ explanation: `Selected: ${selectedOption}) ${selectedText}` }),
       });
 
@@ -340,7 +361,9 @@ export default function StudentApp() {
 
     let fullText = "";
     try {
-      const res = await fetch(`${ASSIGN_URL}/api/teach/${sId}/explain?strategy=${strategy}`);
+      const res = await fetch(`${ASSIGN_URL}/api/teach/${sId}/explain?strategy=${strategy}`, {
+        headers: authHeaders(),
+      });
       if (!res.ok) throw new Error("Stream failed");
 
       const reader = res.body!.getReader();
@@ -401,7 +424,7 @@ export default function StudentApp() {
     try {
       const response = await fetch(`${ASSIGN_URL}/api/teach/${sessionId}/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ explanation: text }),
       });
 

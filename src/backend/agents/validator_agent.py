@@ -81,7 +81,7 @@ async def validate_explanation(
 CONCEPT: {module_title}
 LEARNING OBJECTIVE: {objectives}
 
-WHAT THE TEACHING AGENT EXPLAINED:
+WHAT THE TEACHING AGENT EXPLAINED (this is the reference_explanation):
 {agent_trimmed}
 
 SOURCE MATERIAL:
@@ -89,6 +89,16 @@ SOURCE MATERIAL:
 
 STUDENT'S EXPLANATION:
 {student_explanation}
+
+STRICT RULES — NO EXCEPTIONS:
+1. NEVER mention what the source material does NOT cover. Never say "the source doesn't address..." or "the material doesn't explain..." — this confuses students.
+2. NEVER suggest prerequisites or say "you might want to review X first" — there is no prerequisite feature.
+3. NEVER hallucinate concepts not present in the reference_explanation.
+4. If the student's answer contains the right keywords/concepts from the reference, score >= 7 (MASTERED) unless they made a clear factual error.
+5. Feedback must be grounded ONLY in the reference_explanation provided. Do not bring in outside knowledge.
+6. Always acknowledge what_they_got_right, even on NOT_YET verdicts.
+7. NEVER return NOT_YET on a parsing error or missing data — return PARTIAL as fallback.
+8. Score overrides verdict label: score >= 7 → MASTERED, score 5-6 → PARTIAL, score < 5 → NOT_YET.
 
 EVALUATION RULES:
 - If student captured the core idea correctly → MASTERED (score 8-10)
@@ -100,8 +110,8 @@ EVALUATION RULES:
 
 Return ONLY this JSON (no markdown, no preamble):
 {{
-  "understanding_score": <0-10>,
   "verdict": "MASTERED" | "PARTIAL" | "NOT_YET",
+  "understanding_score": <0-10>,
   "what_they_got_right": "<one sentence — never empty>",
   "pain_point": "<one sentence about gap if PARTIAL/NOT_YET, empty string if MASTERED>",
   "feedback_to_student": "<two sentences: start positive, then guidance if needed>",
@@ -115,7 +125,7 @@ Return ONLY this JSON (no markdown, no preamble):
         gr = gclient.chat.completions.create(
             model="llama-3.3-70b-versatile",  # GROQ_VALIDATE_MODEL
             messages=[
-                {"role": "system", "content": "You are a fair, encouraging educator. Find evidence of understanding, not gaps. Return only valid JSON."},
+                {"role": "system", "content": "You are a fair, encouraging educator. Find evidence of understanding, not gaps. NEVER mention what the source doesn't cover. NEVER suggest prerequisites. Ground feedback ONLY in the reference explanation. Return only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
@@ -132,7 +142,7 @@ Return ONLY this JSON (no markdown, no preamble):
             response = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a fair educator. Find evidence of understanding. Return only valid JSON."},
+                    {"role": "system", "content": "You are a fair educator. Find evidence of understanding. NEVER mention what the source doesn't cover. NEVER suggest prerequisites. Ground feedback ONLY in the reference explanation. Return only valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=300,  # MAX_TOKENS_VALIDATE

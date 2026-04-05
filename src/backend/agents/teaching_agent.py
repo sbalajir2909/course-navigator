@@ -155,7 +155,13 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
             )
             explanation = response.choices[0].message.content.strip()
         except Exception:
-            explanation = f"Let me explain {concept_title}. {module.get('description', '')} What do you already know about this?"
+            explanation = (
+                f"Let me explain {concept_title}. "
+                f"{module.get('description', 'This is an important concept worth understanding carefully.')} "
+                f"The key idea here is to understand the core principles and how they apply in practice. "
+                f"Think about what you already know, then I'll help fill in the gaps. "
+                f"Now — can you explain {concept_title} back to me in your own words?"
+            )
 
     # Forbidden phrase check — regenerate once if triggered
     if any(p.lower() in explanation.lower() for p in FORBIDDEN_PHRASES):

@@ -6,13 +6,13 @@ const roles = [
     title: "I'm a Student",
     description: "Access your AI tutor, track progress, and master concepts at your own pace.",
     icon: GraduationCap,
-    path: "/login",
+    path: "/login?role=student",
   },
   {
     title: "I'm an Instructor",
     description: "See how your students are learning, spot struggles early, and teach smarter.",
     icon: BarChart3,
-    path: "/login",
+    path: "/login?role=professor",
   },
 ];
 
