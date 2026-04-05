@@ -113,7 +113,7 @@ Return ONLY this JSON (no markdown, no preamble):
         from groq import Groq
         gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
         gr = gclient.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You are a fair, encouraging educator. Find evidence of understanding, not gaps. Return only valid JSON."},
                 {"role": "user", "content": prompt},
