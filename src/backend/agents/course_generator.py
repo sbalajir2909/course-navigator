@@ -65,11 +65,11 @@ Return ONLY valid JSON:
 
     try:
         resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.1-8b-instant",  # GROQ_COURSE_MODEL
             messages=[{"role": "user", "content": pass1_prompt}],
             temperature=0.3,
             response_format={"type": "json_object"},
-            max_tokens=3000,
+            max_tokens=3000,  # MAX_TOKENS_COURSE
         )
         raw = resp.choices[0].message.content.strip()
         data = json.loads(raw)
