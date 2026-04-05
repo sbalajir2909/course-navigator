@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
 const API_BASE = "http://localhost:8000";
@@ -9,42 +9,79 @@ const Login = () => {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [backendDown, setBackendDown] = useState(false);
+
+  // Check backend health on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(3000) })
+      .then(r => setBackendDown(!r.ok))
+      .catch(() => setBackendDown(true));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
+
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
+        signal: AbortSignal.timeout(8000),
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || "Login failed. Try again.");
+        throw new Error(data.detail || "Login failed. Check your email and password.");
       }
-      // Persist auth data
       localStorage.setItem("assign_token", data.token);
       localStorage.setItem("assign_student_id", data.student_id);
       localStorage.setItem("assign_name", data.name);
       localStorage.setItem("assign_email", data.email);
+      localStorage.setItem("assign_student_email", data.email);
       navigate("/student");
     } catch (err: any) {
-      setError(err.message || "Login failed. Try again.");
+      if (err.name === "TimeoutError" || err.message?.includes("fetch")) {
+        setBackendDown(true);
+        setError("Cannot reach the backend server. Make sure uvicorn is running: cd ~/assign-b2b && uvicorn main:app --reload");
+      } else {
+        setError(err.message || "Login failed. Try again.");
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  // Skip login for demo — go straight to student view
+  const handleDemoSkip = () => {
+    localStorage.setItem("assign_student_id", "demo-student-" + Date.now());
+    localStorage.setItem("assign_student_email", "demo@assign.ai");
+    localStorage.setItem("assign_name", "Demo Student");
+    navigate("/student");
+  };
+
   return (
     <div className="min-h-screen bg-background flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="text-center mb-8">
           <h1 className="font-serif text-3xl text-primary font-bold">Assign</h1>
           <p className="text-sm text-muted-foreground mt-1">Sign in to your account</p>
         </div>
+
+        {/* Backend down warning */}
+        {backendDown && (
+          <div className="mb-4 bg-orange-50 border border-orange-200 rounded-xl px-4 py-3 text-sm text-orange-800">
+            <p className="font-medium mb-1">⚠ Backend server not running</p>
+            <p className="text-xs text-orange-600 mb-2">Start it in a terminal:</p>
+            <code className="block bg-orange-100 rounded px-2 py-1 text-xs font-mono">cd ~/assign-b2b && uvicorn main:app --reload</code>
+            <button
+              onClick={handleDemoSkip}
+              className="mt-2 w-full text-xs text-orange-700 underline hover:text-orange-900"
+            >
+              Or continue as demo user (no login required) →
+            </button>
+          </div>
+        )}
 
         <div className="bg-card border border-border rounded-xl p-6 shadow-sm">
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -73,7 +110,7 @@ const Login = () => {
             </div>
 
             {error && (
-              <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</p>
+              <div className="text-xs text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</div>
             )}
 
             <button
@@ -85,12 +122,19 @@ const Login = () => {
             </button>
           </form>
 
-          <p className="text-center text-sm text-muted-foreground mt-4">
-            No account?{" "}
-            <Link to="/register" className="text-primary hover:underline font-medium">
-              Create one
-            </Link>
-          </p>
+          <div className="mt-4 space-y-2">
+            <p className="text-center text-sm text-muted-foreground">
+              No account?{" "}
+              <Link to="/register" className="text-primary hover:underline font-medium">
+                Create one
+              </Link>
+            </p>
+            <p className="text-center text-xs text-muted-foreground">
+              <button onClick={handleDemoSkip} className="text-muted-foreground hover:text-foreground underline">
+                Continue without account →
+              </button>
+            </p>
+          </div>
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
