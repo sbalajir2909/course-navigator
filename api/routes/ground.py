@@ -101,10 +101,7 @@ async def _synthesize_with_citations(
     Returns:
         Synthesis text with inline citations.
     """
-    import json as jsonlib
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    from api.cf_client import complete as cf_complete
 
     # Format search results for the prompt
     formatted_results: list[str] = []
@@ -138,16 +135,15 @@ async def _synthesize_with_citations(
     )
 
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
+        return await cf_complete(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            model_key="course",
             temperature=0.4,
             max_tokens=800,
         )
-        return response.choices[0].message.content or ""
     except Exception as exc:
         return f"[Synthesis failed: {exc}]"
 

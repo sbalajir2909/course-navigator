@@ -30,17 +30,26 @@ async def _run_ingest_pipeline(course_id, document_id, file_bytes, filename, chu
         await supabase_query(f"source_documents?id=eq.{document_id}", method="PATCH", json={"raw_text": raw_text})
         chunks = chunk_text(raw_text)
 
-        # Store chunks without embeddings
+        # Store chunks with embeddings (bge-m3 via Ollama)
+        from api.cf_client import embed as cf_embed
         chunk_id_map = {}
         for chunk in chunks:
             cid = str(uuid.uuid4())
             chunk_id_map[chunk["chunk_index"]] = cid
+            # Generate embedding (best-effort — store None if Ollama unavailable)
+            embedding: list[float] | None = None
+            try:
+                vec = await cf_embed(chunk["content"])
+                embedding = vec if vec else None
+            except Exception:
+                pass
             await supabase_query("chunks", method="POST", json={
                 "id": cid,
                 "document_id": document_id,
                 "content": chunk["content"],
                 "chunk_index": chunk["chunk_index"],
-                "metadata": {"token_count": chunk["token_count"]}
+                "metadata": {"token_count": chunk["token_count"]},
+                **({"embedding": embedding} if embedding else {}),
             })
 
         course_rows = await supabase_query("courses", params={"id": f"eq.{course_id}", "select": "title"})
