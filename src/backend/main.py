@@ -140,5 +140,6 @@ async def on_startup() -> None:
         print(f"    [{methods:20s}] {path}")
     print("=" * 60)
     print(f"  Docs:   http://localhost:8000/docs")
+    print(f"  Models: teach=llama-3.1-8b-instant | validate=llama-3.3-70b-versatile")
     print(f"  Health: http://localhost:8000/health")
     print("=" * 60 + "\n")
