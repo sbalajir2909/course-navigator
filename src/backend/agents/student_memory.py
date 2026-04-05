@@ -19,16 +19,7 @@ async def get_student_memory(student_id: str, module_id: str) -> dict:
     Retrieve a student's learning memory for a specific module.
     Returns context that gets injected into the teaching agent's prompt.
     """
-    # Get all past KC attempts for this student on this module
-    attempts = await supabase_query(
-        "kc_attempts",
-        params={
-            "module_id": f"eq.{module_id}",
-            "select": "mastery_probability,attempt_number,validator_scores,student_explanation,created_at",
-        }
-    )
-    
-    # Filter by student via session join
+    # Get this student's sessions for the module
     sessions = await supabase_query(
         "sessions",
         params={
@@ -37,6 +28,20 @@ async def get_student_memory(student_id: str, module_id: str) -> dict:
             "select": "id,mastery_score,completed_at",
         }
     )
+
+    # Fetch kc_attempts only for THIS student's sessions (not all students)
+    attempts = []
+    if sessions:
+        session_ids = [s["id"] for s in sessions]
+        id_list = "(" + ",".join(session_ids) + ")"
+        attempts = await supabase_query(
+            "kc_attempts",
+            params={
+                "session_id": f"in.{id_list}",
+                "select": "mastery_probability,attempt_number,validator_scores,student_explanation,created_at",
+                "order": "created_at.asc",
+            }
+        )
     
     # Get struggle modules (modules where mastery < 0.4 after 2+ attempts)
     all_sessions = await supabase_query(

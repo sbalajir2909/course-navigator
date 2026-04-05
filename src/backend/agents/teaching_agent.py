@@ -7,7 +7,9 @@ The concept's learning_objective drives the teaching and validation focus.
 """
 from __future__ import annotations
 import os
-from openai import AsyncOpenAI
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 TEACHING_SYSTEM_PROMPT = """You are a clear, confident Socratic tutor.
 
@@ -72,9 +74,8 @@ async def teach_concept(
     If concept_index is valid, focus on that specific concept.
     Falls back to full module teaching if no concepts defined.
     """
-    # Primary: Groq. Fallback: GPT-4o-mini.
-    from groq import Groq as _Groq
-    gclient = _Groq(api_key=os.getenv("GROQ_API_KEY"))
+    from utils.cf_client import get_cf_client, CF_MODEL_8B
+    gclient = get_cf_client()
 
     # Get the specific concept to teach
     concepts = module.get("concepts", [])
@@ -136,24 +137,17 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
         messages = [messages[0], messages[-1]]
 
     try:
-        resp = gclient.chat.completions.create(
-            model="llama-3.1-8b-instant",  # GROQ_TEACH_MODEL
+        resp = await gclient.chat.completions.acreate(
+            model=CF_MODEL_8B,
             messages=messages,
             max_tokens=250,  # MAX_TOKENS_TEACH
             temperature=0.4,
         )
         explanation = resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[TEACH] Groq failed: {e} — trying GPT-4o-mini")
+        logger.warning("Cloudflare failed: %s — using fallback", e)
         try:
-            client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                max_tokens=250,  # MAX_TOKENS_TEACH
-                temperature=0.4,
-            )
-            explanation = response.choices[0].message.content.strip()
+            raise e
         except Exception:
             explanation = (
                 f"Let me explain {concept_title}. "
@@ -168,7 +162,7 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
         messages[-1]["content"] += "\n\nCRITICAL: Only teach what IS in the source. Never mention gaps or what the source doesn't cover."
         try:
             resp2 = gclient.chat.completions.create(
-                model="llama-3.1-8b-instant",  # GROQ_TEACH_MODEL
+                model=CF_MODEL_8B,
                 messages=messages,
                 max_tokens=250,  # MAX_TOKENS_TEACH
                 temperature=0.2,

@@ -59,6 +59,12 @@ export const api = {
       body: JSON.stringify({ explanation }),
     }).then((r) => r.json()),
 
+  teachHistory: (sessionId: string) =>
+    fetch(`${API}/api/teach/${sessionId}/history`).then((r) => r.json()),
+
+  teachChat: (sessionId: string) =>
+    fetch(`${API}/api/teach/${sessionId}/chat`).then((r) => r.json()),
+
   moduleAssessments: (courseId: string, moduleId: string) =>
     fetch(`${API}/api/courses/${courseId}/modules/${moduleId}/assessments`).then((r) => r.json()),
 

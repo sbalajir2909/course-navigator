@@ -97,10 +97,21 @@ class ExplainResponse(BaseModel):
 class AttemptOut(BaseModel):
     id: str
     attempt_number: int
+    concept_index: int = 0
+    agent_explanation: str = ""
     student_explanation: str
     validator_scores: dict[str, Any]
     mastery_probability: float
     created_at: str
+
+class ChatMessage(BaseModel):
+    role: str          # "ai" | "student"
+    content: str
+    attempt_number: int
+    concept_index: int = 0
+    mastery_probability: float = 0.0
+    verdict: str = ""
+    created_at: str = ""
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -221,10 +232,11 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
             "mastery_score": prior_mastery,
         })
 
-    # Build initial LangGraph state
-    # Get concepts from module
+    # Build initial session state — no LLM call here, explanation is generated
+    # lazily when the client streams GET /{session_id}/explain
     concepts = module.get("concepts", [])
     total_concepts = len(concepts) if concepts else 1
+    current_concept_title = concepts[0].get("title", "") if concepts else ""
 
     initial_state = {
         "session_id": session_id,
@@ -244,22 +256,10 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
         "should_flag": False,
         "concept_index": 0,
         "total_concepts": total_concepts,
+        "current_explanation": "",  # will be filled on first /explain call
     }
 
-    # Run teach node via graph
-    thread_id = get_thread_id(student_id, module_id)
-    config = {"configurable": {"thread_id": thread_id}}
-    result = await teaching_graph.ainvoke(initial_state, config=config)
-
-    # Store session state
-    s = dict(result)
-    s["module"] = module
-    s["source_chunks"] = source_chunks
-    set_session(session_id, s)
-
-    current_concept_title = ""
-    if concepts and len(concepts) > 0:
-        current_concept_title = concepts[0].get("title", "")
+    set_session(session_id, initial_state)
 
     return StartSessionResponse(
         session_id=session_id,
@@ -409,6 +409,8 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
                 "session_id": session_id,
                 "module_id": module_id,
                 "student_explanation": body.explanation,
+                "agent_explanation": agent_explanation,
+                "concept_index": state.get("concept_index", 0),
                 "validator_scores": {
                     **scores,
                     "verdict": verdict,
@@ -444,6 +446,7 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         state["attempt_number"] = 1  # reset attempts for new concept
         state["pain_point"] = ""
         state["student_history"] = []
+        state["current_explanation"] = ""  # clear so /explain generates fresh for next concept
 
         concept_complete = next_concept_index >= total_concepts
 
@@ -514,12 +517,18 @@ async def get_session_history(session_id: str) -> list[AttemptOut]:
     """Return full attempt history for a session."""
     history = await supabase_query(
         "kc_attempts",
-        params={"session_id": f"eq.{session_id}", "select": "id,attempt_number,student_explanation,validator_scores,mastery_probability,created_at"},
+        params={
+            "session_id": f"eq.{session_id}",
+            "select": "id,attempt_number,concept_index,agent_explanation,student_explanation,validator_scores,mastery_probability,created_at",
+            "order": "attempt_number.asc",
+        },
     )
     return [
         AttemptOut(
             id=h["id"],
             attempt_number=h.get("attempt_number", 0),
+            concept_index=h.get("concept_index", 0),
+            agent_explanation=h.get("agent_explanation") or "",
             student_explanation=h.get("student_explanation", ""),
             validator_scores=h.get("validator_scores") or {},
             mastery_probability=h.get("mastery_probability", 0.0),
@@ -527,3 +536,53 @@ async def get_session_history(session_id: str) -> list[AttemptOut]:
         )
         for h in history
     ]
+
+
+@router.get("/{session_id}/chat", response_model=list[ChatMessage])
+async def get_session_chat(session_id: str) -> list[ChatMessage]:
+    """
+    Return the full chat conversation for a session as an ordered message list.
+    Each attempt produces two messages: AI explanation → student response.
+    """
+    history = await supabase_query(
+        "kc_attempts",
+        params={
+            "session_id": f"eq.{session_id}",
+            "select": "attempt_number,concept_index,agent_explanation,student_explanation,validator_scores,mastery_probability,created_at",
+            "order": "attempt_number.asc",
+        },
+    )
+    messages: list[ChatMessage] = []
+    for h in history:
+        scores = h.get("validator_scores") or {}
+        verdict = scores.get("verdict", "")
+        mastery = h.get("mastery_probability", 0.0)
+        created = h.get("created_at", "")
+        attempt = h.get("attempt_number", 0)
+        cidx = h.get("concept_index", 0)
+
+        ai_msg = h.get("agent_explanation") or ""
+        if ai_msg:
+            messages.append(ChatMessage(
+                role="ai",
+                content=ai_msg,
+                attempt_number=attempt,
+                concept_index=cidx,
+                mastery_probability=mastery,
+                verdict="",
+                created_at=created,
+            ))
+
+        student_msg = h.get("student_explanation") or ""
+        if student_msg:
+            messages.append(ChatMessage(
+                role="student",
+                content=student_msg,
+                attempt_number=attempt,
+                concept_index=cidx,
+                mastery_probability=mastery,
+                verdict=verdict,
+                created_at=created,
+            ))
+
+    return messages

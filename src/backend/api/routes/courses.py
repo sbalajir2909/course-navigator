@@ -84,27 +84,21 @@ class AssessmentOut(BaseModel):
 
 @router.get("/{course_id}", response_model=CourseOut)
 async def get_course(course_id: str) -> CourseOut:
-    """
-    Return full course details including all modules and their prerequisites.
-    """
+    """Return full course details including all modules."""
     courses = await supabase_query(
         "courses",
-        params={
-            "id": f"eq.{course_id}",
-            "select": "id,professor_id,title,description,status",
-        },
+        params={"id": f"eq.{course_id}", "select": "id,professor_id,title,description,status"},
     )
     if not courses:
         raise HTTPException(status_code=404, detail=f"Course {course_id} not found.")
 
     course = courses[0]
 
-    # Fetch modules ordered by order_index
     modules_raw = await supabase_query(
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,description,order_index,estimated_minutes,concepts",
+            "select": "id,title,description,order_index,estimated_minutes,concepts,prerequisites",
             "order": "order_index.asc",
         },
     )
@@ -119,6 +113,7 @@ async def get_course(course_id: str) -> CourseOut:
                 order_index=m.get("order_index", 0),
                 estimated_minutes=m.get("estimated_minutes", 30),
                 concepts=m.get("concepts"),
+                prerequisites=m.get("prerequisites") or [],
             )
         )
 
@@ -134,13 +129,7 @@ async def get_course(course_id: str) -> CourseOut:
 
 @router.get("/{course_id}/graph", response_model=CourseGraphOut)
 async def get_course_graph(course_id: str) -> CourseGraphOut:
-    """
-    Return a React Flow–compatible dependency graph for the course.
-
-    Nodes represent modules; edges represent prerequisites.
-    Layout uses a simple top-down layered approach based on order_index.
-    """
-    # Verify course exists
+    """Return a React Flow–compatible dependency graph for the course."""
     courses = await supabase_query(
         "courses",
         params={"id": f"eq.{course_id}", "select": "id,title"},
@@ -148,12 +137,11 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
     if not courses:
         raise HTTPException(status_code=404, detail=f"Course {course_id} not found.")
 
-    # Fetch modules
     modules_raw = await supabase_query(
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,order_index,estimated_minutes",
+            "select": "id,title,order_index,estimated_minutes,prerequisites",
             "order": "order_index.asc",
         },
     )
@@ -161,7 +149,6 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
     if not modules_raw:
         return CourseGraphOut(nodes=[], edges=[])
 
-    # Build nodes with simple grid layout (200px columns, 120px rows)
     nodes: list[GraphNode] = []
     COLS = 3
     X_SPACING = 300
@@ -183,39 +170,27 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
             )
         )
 
-    # Build edges from the prerequisites table
-    prereqs_raw = await supabase_query(
-        "prerequisites",
-        params={
-            "course_id": f"eq.{course_id}",
-            "select": "id,module_id,prerequisite_module_id",
-        },
-    )
-
+    # Build edges from prerequisites array stored on each module
     edges: list[GraphEdge] = []
-    for p in prereqs_raw:
-        edge_id = f"e-{p['prerequisite_module_id']}-{p['module_id']}"
-        edges.append(
-            GraphEdge(
-                id=edge_id,
-                source=p["prerequisite_module_id"],
-                target=p["module_id"],
-                animated=False,
+    for m in modules_raw:
+        for prereq_id in (m.get("prerequisites") or []):
+            edges.append(
+                GraphEdge(
+                    id=f"e-{prereq_id}-{m['id']}",
+                    source=prereq_id,
+                    target=m["id"],
+                    animated=False,
+                )
             )
-        )
 
     return CourseGraphOut(nodes=nodes, edges=edges)
 
 
 @router.post("/{course_id}/enroll", response_model=EnrollResponse)
 async def enroll_student(course_id: str, body: EnrollRequest) -> EnrollResponse:
-    """
-    Enroll a student in a course.
-    Idempotent: returns existing enrollment if already enrolled.
-    """
+    """Enroll a student in a course. Idempotent."""
     student_id = body.student_id
 
-    # Verify course
     courses = await supabase_query(
         "courses",
         params={"id": f"eq.{course_id}", "select": "id"},
@@ -223,7 +198,6 @@ async def enroll_student(course_id: str, body: EnrollRequest) -> EnrollResponse:
     if not courses:
         raise HTTPException(status_code=404, detail=f"Course {course_id} not found.")
 
-    # Auto-create student from email+name if no student_id
     if not student_id:
         email = body.email or "student@demo.com"
         name = body.name or "Demo Student"
@@ -248,60 +222,26 @@ async def enroll_student(course_id: str, body: EnrollRequest) -> EnrollResponse:
         if not students:
             raise HTTPException(status_code=404, detail=f"Student {student_id} not found.")
 
-    # Check for existing enrollment
     existing = await supabase_query(
         "enrollments",
-        params={
-            "student_id": f"eq.{student_id}",
-            "course_id": f"eq.{course_id}",
-            "select": "id",
-        },
+        params={"student_id": f"eq.{student_id}", "course_id": f"eq.{course_id}", "select": "id"},
     )
     if existing:
-        return EnrollResponse(
-            enrollment_id=existing[0]["id"],
-            student_id=student_id,
-            course_id=course_id,
-        )
+        return EnrollResponse(enrollment_id=existing[0]["id"], student_id=student_id, course_id=course_id)
 
-    # Create enrollment
     enrollment_id = str(uuid.uuid4())
     await supabase_query(
         "enrollments",
         method="POST",
-        json={
-            "id": enrollment_id,
-            "student_id": student_id,
-            "course_id": course_id,
-        },
+        json={"id": enrollment_id, "student_id": student_id, "course_id": course_id},
     )
 
-    return EnrollResponse(
-        enrollment_id=enrollment_id,
-        student_id=student_id,
-        course_id=course_id,
-    )
+    return EnrollResponse(enrollment_id=enrollment_id, student_id=student_id, course_id=course_id)
 
 
 @router.get("/{course_id}/modules/{module_id}/assessments", response_model=list[AssessmentOut])
 async def get_module_assessments(course_id: str, module_id: str) -> list[AssessmentOut]:
-    """
-    Return all assessments for a specific module.
-
-    Validates that the module belongs to the given course.
-    """
-    # Verify module belongs to course — return empty list instead of 404
-    modules = await supabase_query(
-        "modules",
-        params={
-            "id": f"eq.{module_id}",
-            "course_id": f"eq.{course_id}",
-            "select": "id",
-        },
-    )
-    if not modules:
-        return []
-
+    """Return all assessments for a specific module (single DB query)."""
     assessments_raw = await supabase_query(
         "assessments",
         params={
@@ -309,15 +249,53 @@ async def get_module_assessments(course_id: str, module_id: str) -> list[Assessm
             "select": "id,question,question_type,options,answer,reference_explanation",
         },
     )
-
     return [
         AssessmentOut(
             id=a["id"],
             question=a["question"],
-            question_type=a["question_type"],
+            question_type=a.get("question_type", "multiple_choice"),
             options=a.get("options"),
-            answer=a["answer"],
+            answer=a.get("answer", ""),
             reference_explanation=a.get("reference_explanation"),
         )
         for a in assessments_raw
     ]
+
+
+@router.get("/{course_id}/assessments")
+async def get_course_assessments(course_id: str) -> dict:
+    """
+    Return all assessments for every module grouped by module_id.
+    Two DB queries regardless of module count.
+    """
+    modules_raw = await supabase_query(
+        "modules",
+        params={"course_id": f"eq.{course_id}", "select": "id", "order": "order_index.asc"},
+    )
+    if not modules_raw:
+        return {"assessments_by_module": {}}
+
+    module_ids = [m["id"] for m in modules_raw]
+    id_list = "(" + ",".join(module_ids) + ")"
+    assessments_raw = await supabase_query(
+        "assessments",
+        params={
+            "module_id": f"in.{id_list}",
+            "select": "id,module_id,question,question_type,options,answer,reference_explanation",
+        },
+    )
+
+    grouped: dict[str, list] = {mid: [] for mid in module_ids}
+    for a in assessments_raw:
+        mid = a.get("module_id")
+        if mid in grouped:
+            grouped[mid].append({
+                "id": a["id"],
+                "question": a["question"],
+                "question_type": a.get("question_type", "multiple_choice"),
+                "options": a.get("options"),
+                "answer": a.get("answer", ""),
+                "reference_explanation": a.get("reference_explanation"),
+            })
+
+    return {"assessments_by_module": grouped}

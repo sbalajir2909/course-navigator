@@ -9,11 +9,14 @@ This is what makes it feel like a real course, not a single-question quiz.
 """
 from __future__ import annotations
 import os, json
-from groq import Groq
+from utils.cf_client import get_cf_client, CF_MODEL_8B
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 async def generate_course(chunks: list[dict], title: str) -> dict:
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    client = get_cf_client()
 
     # Limit chunks to avoid TPM overflow
     chunk_text = "\n\n".join([
@@ -64,8 +67,8 @@ Return ONLY valid JSON:
 }}"""
 
     try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # GROQ_COURSE_MODEL
+        resp = await client.chat.completions.acreate(
+            model=CF_MODEL_8B,
             messages=[{"role": "user", "content": pass1_prompt}],
             temperature=0.3,
             response_format={"type": "json_object"},
@@ -74,7 +77,7 @@ Return ONLY valid JSON:
         raw = resp.choices[0].message.content.strip()
         data = json.loads(raw)
     except Exception as e:
-        print(f"[COURSE_GEN] Error in pass 1: {e}")
+        logger.error("Error in pass 1: %s", e)
         # Minimal fallback structure
         data = {
             "title": title,

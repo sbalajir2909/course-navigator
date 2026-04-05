@@ -243,28 +243,17 @@ const StudentLearning = () => {
     }
   };
 
-  // Start the teaching stream
-  const startTeaching = async (simplified: boolean, strategy?: string) => {
-    if (!moduleId || !courseId) return;
-
-    const studentId = await ensureStudentId(courseId);
-    const data = await api.teachStart(moduleId, studentId);
-    setSessionId(data.session_id);
-
+  // Stream explanation from an existing session_id (used for next concept or reteach)
+  const streamFromSession = async (sid: string, strategy?: string) => {
+    const qs = strategy ? `?strategy=${strategy}` : "";
     const streamMsgId = nextId();
     setMessages((prev) => [
       ...prev,
       { id: streamMsgId, role: "ai", content: "", streaming: true },
     ]);
 
-    // Determine query param for strategy
-    const strategyParam = strategy || (simplified ? "simplified" : "");
-    const qs = strategyParam ? `?strategy=${strategyParam}` : "";
-
     try {
-      const resp = await fetch(
-        `http://localhost:8000/api/teach/${data.session_id}/explain${qs}`
-      );
+      const resp = await fetch(`http://localhost:8000/api/teach/${sid}/explain${qs}`);
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -281,27 +270,18 @@ const StudentLearning = () => {
             if (payload === "[DONE]") {
               updateMessage(streamMsgId, (m) => ({ ...m, streaming: false }));
               setPhase("respond");
-              addMessage(
-                "ai",
-                "Now explain this concept in your own words to demonstrate your understanding."
-              );
+              addMessage("ai", "Now explain this concept in your own words to demonstrate your understanding.");
               return;
             }
             try {
               const event = JSON.parse(payload);
               if (event.token) {
-                updateMessage(streamMsgId, (m) => ({
-                  ...m,
-                  content: m.content + event.token,
-                }));
+                updateMessage(streamMsgId, (m) => ({ ...m, content: m.content + event.token }));
               }
               if (event.done) {
                 updateMessage(streamMsgId, (m) => ({ ...m, streaming: false }));
                 setPhase("respond");
-                addMessage(
-                  "ai",
-                  "Now explain this concept in your own words to demonstrate your understanding."
-                );
+                addMessage("ai", "Now explain this concept in your own words to demonstrate your understanding.");
                 return;
               }
             } catch {}
@@ -310,10 +290,7 @@ const StudentLearning = () => {
       }
       updateMessage(streamMsgId, (m) => ({ ...m, streaming: false }));
       setPhase("respond");
-      addMessage(
-        "ai",
-        "Now explain this concept in your own words to demonstrate your understanding."
-      );
+      addMessage("ai", "Now explain this concept in your own words to demonstrate your understanding.");
     } catch {
       updateMessage(streamMsgId, (m) => ({
         ...m,
@@ -324,16 +301,22 @@ const StudentLearning = () => {
     }
   };
 
-  // Adaptive re-teach: trigger a new session with a different strategy
-  const triggerAdaptiveReteach = async (currentRetry: number) => {
+  // Start the teaching stream
+  const startTeaching = async (simplified: boolean, strategy?: string) => {
     if (!moduleId || !courseId) return;
 
+    const studentId = await ensureStudentId(courseId);
+    const data = await api.teachStart(moduleId, studentId);
+    setSessionId(data.session_id);
+
+    const strategyParam = strategy || (simplified ? "simplified" : "");
+    await streamFromSession(data.session_id, strategyParam || undefined);
+  };
+
+  // Adaptive re-teach: reuse existing session with a different strategy
+  const triggerAdaptiveReteach = async (currentRetry: number) => {
     if (currentRetry >= MAX_RETRIES) {
-      // Give up after max retries
-      addMessage(
-        "ai",
-        "No worries! This is a tough concept. I've flagged this for your professor. Let's move on."
-      );
+      addMessage("ai", "No worries! This is a tough concept. I've flagged this for your professor. Let's move on.");
       setPhase("give_up");
       return;
     }
@@ -342,12 +325,14 @@ const StudentLearning = () => {
     const strategy = RETRY_STRATEGIES[strategyIndex];
 
     addMessage("ai", "Let me try a different approach...");
-
-    // Brief pause for UX
     await new Promise((r) => setTimeout(r, 600));
 
     setPhase("teaching");
-    await startTeaching(false, strategy);
+    if (sessionId) {
+      await streamFromSession(sessionId, strategy);
+    } else if (moduleId && courseId) {
+      await startTeaching(false, strategy);
+    }
   };
 
   // Submit student explanation
@@ -382,8 +367,20 @@ const StudentLearning = () => {
       addMessage("ai", feedbackText);
 
       if (data.advance) {
+        // All concepts in this module done
         addMessage("ai", "Module complete! Move to next module.");
         setPhase("feedback");
+      } else if (data.next_action === "next_concept") {
+        // Concept mastered, more concepts remain in this module
+        const conceptNum = (data.concept_index ?? 1);
+        const totalConcepts = data.total_concepts ?? 1;
+        addMessage(
+          "ai",
+          `Concept ${conceptNum} of ${totalConcepts} complete! Let's continue to the next concept.`
+        );
+        await new Promise((r) => setTimeout(r, 800));
+        setPhase("teaching");
+        await streamFromSession(sessionId!);
       } else {
         const newFailCount = failCount + 1;
         setFailCount(newFailCount);

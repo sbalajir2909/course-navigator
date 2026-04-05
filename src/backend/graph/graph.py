@@ -90,8 +90,8 @@ async def validator_node(state: TeachingState) -> dict[str, Any]:
 
 async def prereq_recommendation_node(state: TeachingState) -> dict[str, Any]:
     """Identify prerequisite topics when student fails 3+ times."""
-    from groq import Groq
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    from utils.cf_client import get_cf_client, CF_MODEL_8B
+    client = get_cf_client()
 
     module = state.get("module", {})
     concepts_missed = state.get("concepts_missed", [])
@@ -116,8 +116,8 @@ Return JSON:
 
     prereqs = []
     try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+        response = await client.chat.completions.acreate(
+            model=CF_MODEL_8B,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             response_format={"type": "json_object"},

@@ -5,18 +5,11 @@ Direct call — no LangGraph wrapping. Results go straight to the API.
 """
 from __future__ import annotations
 import os, json
-from openai import AsyncOpenAI
+from utils.logger import get_logger
 
-# Start mastery at 0, not 0.3
+logger = get_logger(__name__)
+
 P_INIT = 0.0
-
-_client: AsyncOpenAI | None = None
-
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    return _client
 
 
 async def validate_explanation(
@@ -31,7 +24,7 @@ async def validate_explanation(
     Validates student explanation semantically against what was taught.
     Returns complete result dict — never raises, never silently returns NOT_YET on error.
     """
-    print(f"[VALIDATOR] Called with {len(student_explanation.split())} words, attempt={attempt_number}")
+    logger.info("Called with %d words, attempt=%d", len(student_explanation.split()), attempt_number)
 
     module_title = module.get("title", "this concept")
     objectives = ", ".join(module.get("learning_objectives", [])[:3])
@@ -39,7 +32,7 @@ async def validate_explanation(
     # ── Hard reject: too short ────────────────────────────────
     word_count = len(student_explanation.strip().split())
     if word_count < 10:
-        print(f"[VALIDATOR] Rejected: too short ({word_count} words)")
+        logger.warning("Rejected: too short (%d words)", word_count)
         return _build_result(
             verdict="INVALID_INPUT",
             score=0,
@@ -60,7 +53,7 @@ async def validate_explanation(
         "i understand", "i understand ✓", "i get it", "ready", "done",
     }
     if student_explanation.strip().lower().rstrip(".,!?") in non_answers:
-        print(f"[VALIDATOR] Rejected: non-answer phrase")
+        logger.warning("Rejected: non-answer phrase")
         return _build_result(
             verdict="INVALID_INPUT",
             score=0,
@@ -118,51 +111,34 @@ Return ONLY this JSON (no markdown, no preamble):
   "concepts_missed": []
 }}"""
 
-    # Primary: Groq (free, fast). Fallback: GPT-4o if available.
     try:
-        from groq import Groq
-        gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        gr = gclient.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # GROQ_VALIDATE_MODEL
+        from utils.cf_client import get_cf_client, CF_MODEL_70B
+        gclient = get_cf_client()
+        gr = await gclient.chat.completions.acreate(
+            model=CF_MODEL_70B,
             messages=[
                 {"role": "system", "content": "You are a fair, encouraging educator. Find evidence of understanding, not gaps. NEVER mention what the source doesn't cover. NEVER suggest prerequisites. Ground feedback ONLY in the reference explanation. Return only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
             response_format={"type": "json_object"},
-            max_tokens=300,  # MAX_TOKENS_VALIDATE
+            max_tokens=300,
         )
         result = json.loads(gr.choices[0].message.content)
-        print(f"[VALIDATOR] Groq result: verdict={result.get('verdict')}, score={result.get('understanding_score')}")
+        logger.info("Cloudflare result: verdict=%s, score=%s", result.get('verdict'), result.get('understanding_score'))
 
     except Exception as e:
-        print(f"[VALIDATOR ERROR] Groq failed: {e} — falling back to GPT-4o")
-        try:
-            client = _get_client()
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a fair educator. Find evidence of understanding. NEVER mention what the source doesn't cover. NEVER suggest prerequisites. Ground feedback ONLY in the reference explanation. Return only valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=300,  # MAX_TOKENS_VALIDATE
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            result = json.loads(response.choices[0].message.content)
-            print(f"[VALIDATOR] GPT-4o fallback result: verdict={result.get('verdict')}")
-        except Exception as e2:
-            print(f"[VALIDATOR ERROR] Both LLMs failed: {e2} — returning PARTIAL")
-            return _build_result(
-                verdict="PARTIAL",
-                score=5,
-                what_right="Your explanation was received and showed genuine engagement.",
-                pain_point="There was a technical issue evaluating your response fully.",
-                feedback="There was a technical issue on our end. Your response looked good — let's continue.",
-                missed=[],
-                prior_mastery=prior_mastery,
-                attempt_number=attempt_number,
-            )
+        logger.error("Cloudflare failed: %s — returning PARTIAL", e)
+        return _build_result(
+            verdict="PARTIAL",
+            score=5,
+            what_right="Your explanation was received and showed genuine engagement.",
+            pain_point="There was a technical issue evaluating your response fully.",
+            feedback="There was a technical issue on our end. Your response looked good — let's continue.",
+            missed=[],
+            prior_mastery=prior_mastery,
+            attempt_number=attempt_number,
+        )
 
     # ── Score-based reconciliation ────────────────────────────
     score = max(0, min(10, int(result.get("understanding_score", 5))))
@@ -189,7 +165,7 @@ Return ONLY this JSON (no markdown, no preamble):
         result["pain_point"] = ""
         result["concepts_missed"] = []
 
-    print(f"[VALIDATOR] Final: verdict={verdict}, score={score}, mastery: {prior_mastery:.2f} → {_new_mastery(prior_mastery, verdict):.2f}")
+    logger.info("Final: verdict=%s, score=%d, mastery: %.2f → %.2f", verdict, score, prior_mastery, _new_mastery(prior_mastery, verdict))
 
     return _build_result(
         verdict=verdict,
