@@ -417,7 +417,7 @@ export default function StudentApp() {
       // Show feedback with verdict
       // Handle INVALID_INPUT — no attempt counted, stay in explain_back
       if (verdict === "INVALID_INPUT") {
-        addAIMessage(`💬 ${feedback}`, []);
+        setMessages(prev => [...prev, {role: "ai", text: feedback, feedbackCard: "invalid", whatTheyGotRight: ""}]);
         setPhase("explain_back");
         setIsLoading(false);
         return;
@@ -665,28 +665,30 @@ export default function StudentApp() {
                   ? "bg-card border border-border text-foreground"
                   : "bg-primary text-white"
               }`}>
-                {/* Feedback card rendering */}
-              {msg.feedbackCard === "mastered" && (
-                <div style={{background: "#DCFCE7", border: "1px solid #16A34A", borderRadius: 8, padding: 12, marginBottom: 4}}>
-                  <div style={{color: "#15803D", fontWeight: 600, marginBottom: 4}}>✓ Understood!</div>
-                  <div style={{color: "#166534", fontSize: 14}}>{msg.whatTheyGotRight || msg.text}</div>
-                </div>
-              )}
-              {msg.feedbackCard === "partial" && (
-                <div style={{background: "#FEF9C3", border: "1px solid #D97706", borderRadius: 8, padding: 12, marginBottom: 4}}>
-                  <div style={{color: "#92400E", fontWeight: 600, marginBottom: 4}}>Almost there</div>
-                  {msg.whatTheyGotRight && <div style={{color: "#78350F", fontSize: 14, marginBottom: 6}}>✓ {msg.whatTheyGotRight}</div>}
-                  <div style={{color: "#92400E", fontSize: 14}}>{msg.text}</div>
-                </div>
-              )}
-              {msg.feedbackCard === "not_yet" && (
-                <div style={{background: "#FEF2F2", border: "1px solid #DC2626", borderRadius: 8, padding: 12, marginBottom: 4}}>
-                  <div style={{color: "#991B1B", fontWeight: 600, marginBottom: 4}}>Let's try again</div>
-                  {msg.whatTheyGotRight && <div style={{color: "#7F1D1D", fontSize: 13, marginBottom: 6}}>You got this right: {msg.whatTheyGotRight}</div>}
-                  <div style={{color: "#B91C1C", fontSize: 14}}>{msg.text}</div>
-                </div>
-              )}
-              {!msg.feedbackCard && msg.text.split("**").map((part, pi) =>
+                {/* Feedback card — uses verdictConfig, all text from API */}
+              {msg.feedbackCard ? (() => {
+                const verdictConfig: Record<string, {bg: string; border: string; titleColor: string; title: string}> = {
+                  mastered: {bg: "#DCFCE7", border: "#16A34A", titleColor: "#15803D", title: "✓ Understood!"},
+                  partial:  {bg: "#FEF9C3", border: "#D97706", titleColor: "#92400E", title: "Almost there"},
+                  not_yet:  {bg: "#FEF2F2", border: "#DC2626", titleColor: "#991B1B", title: "Let's try again"},
+                  invalid:  {bg: "#FEF9C3", border: "#D97706", titleColor: "#92400E", title: "Please try again"},
+                };
+                const cfg = verdictConfig[msg.feedbackCard] || verdictConfig.not_yet;
+                return (
+                  <div style={{background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 8, padding: 12}}>
+                    <div style={{color: cfg.titleColor, fontWeight: 600, marginBottom: 4}}>{cfg.title}</div>
+                    {msg.whatTheyGotRight && msg.feedbackCard !== "mastered" && (
+                      <div style={{color: cfg.titleColor, opacity: 0.85, fontSize: 13, marginBottom: 6}}>✓ {msg.whatTheyGotRight}</div>
+                    )}
+                    {msg.feedbackCard === "mastered" && msg.whatTheyGotRight && (
+                      <div style={{color: cfg.titleColor, fontSize: 14}}>{msg.whatTheyGotRight}</div>
+                    )}
+                    {msg.text && msg.feedbackCard !== "mastered" && (
+                      <div style={{color: cfg.titleColor, fontSize: 14, marginTop: 4}}>{msg.text}</div>
+                    )}
+                  </div>
+                );
+              })() : msg.text.split("**").map((part, pi) =>
                 pi % 2 === 1 ? <strong key={pi}>{part}</strong> : <span key={pi}>{part}</span>
               )}
                 {msg.streaming && <span className="inline-block w-1.5 h-4 bg-primary/60 ml-1 animate-pulse rounded" />}
