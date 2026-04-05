@@ -1,39 +1,61 @@
 """
 agents/teaching_agent.py
-Strategy-aware Socratic teaching agent.
-Switches strategy based on attempt_number and directly addresses prior pain_point.
+Strategy-aware Socratic teaching agent using GPT-4o-mini.
+Strict forbidden-phrase check ensures clean, confident explanations.
 """
 from __future__ import annotations
 import os
-from groq import Groq
+from openai import AsyncOpenAI
 
-STRATEGY_PROMPTS = {
-    "direct": """Teach this concept directly from the source material.
-Structure: (1) One-sentence definition. (2) Why it matters. (3) Key components or steps. (4) Ask student to explain back.
-Keep it focused. 3-4 paragraphs max.""",
+TEACHING_SYSTEM_PROMPT = """You are a clear, confident Socratic tutor.
 
-    "analogy": """The student struggled on their first attempt. Use a concrete real-world analogy.
-Structure: (1) Pick ONE familiar analogy that maps directly to the concept. (2) Map each part of the analogy to the actual concept. (3) Explain what the analogy does NOT capture. (4) Ask student to extend the analogy themselves.
-The analogy must be specific — not "it's like a car" but "it's like the dashboard warning lights in a car, where each light = one layer of the framework."
-3-4 paragraphs max.""",
+YOUR ONLY JOB: Explain the concept below simply and clearly, then ask the student to explain it back.
 
-    "example": """The student is still struggling. Walk through ONE concrete worked example.
-Structure: (1) Set up a specific real scenario by name. (2) Apply the concept step-by-step to that scenario. (3) Show what would happen WITHOUT this concept. (4) Ask student to apply the concept to a different scenario.
-Be specific — use names, numbers, and concrete details. 3-4 paragraphs max.""",
+STRICT RULES — violating any of these makes you useless:
+1. Teach ONLY what is in the SOURCE MATERIAL. Do not add external knowledge.
+2. NEVER mention what the source material does NOT cover. Never say "the source doesn't address..." or "the material doesn't explain..." — this confuses students and teaches them nothing.
+3. Keep your explanation to 4-6 sentences maximum. No walls of text.
+4. Use simple, direct language. No hedging. No qualifiers. Teach confidently.
+5. End EVERY explanation with ONE clear question: "Now explain [specific concept] back to me in your own words."
+6. On attempt 2: use a concrete real-world analogy. Map it explicitly back to the concept.
+7. On attempt 3: give one specific worked example. Show the concept in action.
+8. On attempt 4: break it into 3 numbered steps. Simple. Sequential. Clear.
 
-    "decompose": """The student is significantly struggling. Break the concept into its smallest parts.
-Structure: (1) Identify the 3-4 atomic sub-concepts that make up this topic. (2) Explain each sub-concept in one sentence. (3) Show how they connect. (4) Ask student to explain just ONE sub-concept first.
-Do not teach the whole concept at once. Build from pieces. 3-4 paragraphs max.""",
+NEVER DO THESE:
+- Never say "According to the source material..."
+- Never say "The material doesn't address..."
+- Never say "The source doesn't explicitly..."
+- Never say "the source material does not"
+- Never say "doesn't provide further details"
+- Never say "not explicitly mentioned"
+- Never say "not provided in the source"
+- Never ask multiple questions
+- Never write more than 6 sentences
+- Never use the phrase "it is worth noting"
+- Never hedge with "however" or "but" when describing the core concept"""
+
+FORBIDDEN_PHRASES = [
+    "source material does not",
+    "material doesn't address",
+    "source doesn't explicitly",
+    "not explicitly mentioned",
+    "not provided in the source",
+    "doesn't provide further details",
+    "the material doesn't",
+    "the source doesn't",
+    "according to the source",
+    "the source material",
+    "material does not",
+    "doesn't address that",
+]
+
+STRATEGY_INSTRUCTIONS = {
+    1: "Explain directly and clearly from the source material.",
+    2: "Use a concrete real-world analogy. Map each part of the analogy explicitly back to the concept.",
+    3: "Give one specific worked example. Show the concept applied step-by-step to a real scenario.",
+    4: "Break it into exactly 3 numbered steps. One sentence each. Simple and sequential.",
 }
 
-SYSTEM_RULES = """STRICT RULES — FOLLOW EXACTLY:
-1. Use ONLY information from the source material. Do NOT add outside knowledge.
-2. If the source doesn't cover something, say "The material doesn't address that specifically."
-3. Maximum 4 paragraphs. No essays.
-4. End with exactly ONE specific question asking the student to explain back.
-5. Do NOT repeat what was already explained if there's prior attempt history.
-6. Do NOT use filler phrases like "Great question!" or "Absolutely!"
-7. Be direct and specific."""
 
 async def teach_concept(
     module: dict,
@@ -44,56 +66,87 @@ async def teach_concept(
     attempt_number: int = 1,
     memory_context: str = "",
 ) -> str:
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    source_text = "\n\n".join(chunk[:400] for chunk in source_chunks[:6]) if source_chunks else module.get("description", "No source material.")
-    strategy_instruction = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS["direct"])
+    # Map strategy string to attempt number for instruction lookup
+    strategy_to_attempt = {"direct": 1, "analogy": 2, "example": 3, "decompose": 4}
+    effective_attempt = strategy_to_attempt.get(strategy, attempt_number)
+    strategy_instruction = STRATEGY_INSTRUCTIONS.get(effective_attempt, STRATEGY_INSTRUCTIONS[4])
+
+    # Build source context — MAX 150 words per chunk, 3 chunks max
+    truncated_chunks = []
+    for chunk in source_chunks[:3]:
+        words = chunk.split()
+        truncated_chunks.append(" ".join(words[:150]))
+    source_context = "\n---\n".join(truncated_chunks) if truncated_chunks else module.get("description", "")
+
     objectives = ", ".join(module.get("learning_objectives", [])[:3])
 
-    # Build pain point context for reteaching
+    # Pain point context for reteaching
     pain_context = ""
     if pain_point and attempt_number > 1:
-        pain_context = f"""
-PREVIOUS ATTEMPT FEEDBACK:
-The student struggled with: "{pain_point}"
-You MUST directly address this in your explanation. Don't just re-explain — fix the specific gap identified above."""
+        pain_context = f"\nThe student's previous attempt struggled with: {pain_point}\nAddress this directly using the strategy above.\n"
 
-    # Build attempt history (last 2 only)
-    history_text = ""
-    if student_history:
-        recent = [h for h in student_history[-2:]
-                  if h.get("student_explanation", "").lower().strip() not in
-                  {"i understand", "i understand ✓", "i get it", "i don't know", "i dont know"}]
-        if recent:
-            parts = [f'Student said: "{h["student_explanation"][:150]}" '
-                     f'(verdict: {h.get("verdict", "unknown")})' for h in recent]
-            history_text = "\nPrevious attempts:\n" + "\n".join(parts)
+    user_message = f"""SOURCE MATERIAL:
+{source_context}
 
-    prompt = f"""{SYSTEM_RULES}
-
-MODULE: {module.get("title", "Unknown")}
-LEARNING OBJECTIVES: {objectives}
-
-SOURCE MATERIAL (use ONLY this):
-{source_text}
-{history_text}
+LEARNING OBJECTIVE: {objectives}
 {pain_context}
-{f"Student context: {memory_context}" if memory_context else ""}
+STRATEGY FOR THIS ATTEMPT (#{attempt_number}): {strategy_instruction}
 
-STRATEGY FOR THIS ATTEMPT (attempt #{attempt_number}):
-{strategy_instruction}
+Explain the concept now. Maximum 6 sentences. End with your question."""
 
-Teach now:"""
+    # Build message history — last 2 turns only
+    history = []
+    for h in student_history[-2:]:
+        exp = h.get("student_explanation", "")
+        if exp and len(exp.split()) >= 5:
+            history.append({"role": "user", "content": f"Student said: {exp[:200]}"})
+
+    messages = [
+        {"role": "system", "content": TEACHING_SYSTEM_PROMPT},
+        *history,
+        {"role": "user", "content": user_message},
+    ]
+
+    # Token guard
+    total_chars = sum(len(m["content"]) for m in messages)
+    if total_chars > 8000:
+        messages = [messages[0], messages[-1]]
 
     try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=600,
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=250,
+            temperature=0.4,
         )
-        return response.choices[0].message.content
+        explanation = response.choices[0].message.content.strip()
     except Exception:
-        return (f"Let me explain {module.get('title', 'this concept')} differently. "
-                f"{module.get('description', '')} "
-                f"Can you tell me what you already know about this topic?")
+        # Fallback to Groq
+        from groq import Groq
+        gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        gr = gclient.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            max_tokens=250,
+            temperature=0.4,
+        )
+        explanation = gr.choices[0].message.content.strip()
+
+    # Forbidden phrase check — regenerate once if triggered
+    has_forbidden = any(phrase.lower() in explanation.lower() for phrase in FORBIDDEN_PHRASES)
+    if has_forbidden:
+        messages[-1]["content"] += "\n\nCRITICAL: Do NOT mention what the source doesn't cover. Only teach what IS there. No hedging. Be confident."
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=250,
+                temperature=0.2,
+            )
+            explanation = response.choices[0].message.content.strip()
+        except Exception:
+            pass
+
+    return explanation
