@@ -1,49 +1,55 @@
 #!/usr/bin/env bash
 # =============================================================================
 # scripts/gautschi_tunnel.sh
-# Run this on your LOCAL MAC to forward Gautschi's Ollama port to localhost:11435
+# Run on your LOCAL MAC to forward Gautschi Ollama → localhost:11435
 #
 # Usage:
-#   bash scripts/gautschi_tunnel.sh
+#   bash scripts/gautschi_tunnel.sh <compute_node>
 #
-# What it does:
-#   SSH tunnel: localhost:11435 → <compute_node>:11434 via gautschi login node
+# Example:
+#   bash scripts/gautschi_tunnel.sh g001
 #
-# Prerequisites:
-#   1. Gautschi Ollama server must be running (see setup_gautschi.sh)
-#   2. You need to know the compute node name (e.g. gpu-a001)
-#      Find it with:  squeue -u sbalajir   (look at NODELIST column)
+# Find your compute node name:
+#   ssh sbalajir@gautschi.rcac.purdue.edu 'squeue -u sbalajir'
+#   look at the NODELIST column
+#
+# Once tunnel is open, add to your .env:
+#   OLLAMA_REMOTE_URL=http://localhost:11435
 # =============================================================================
-
-set -e
 
 GAUTSCHI_USER="sbalajir"
 GAUTSCHI_LOGIN="gautschi.rcac.purdue.edu"
-LOCAL_PORT=11435          # local port on your Mac
-REMOTE_PORT=11434         # Ollama port on the compute node
+LOCAL_PORT=11435
+REMOTE_PORT=11434
 
-# ── Find or prompt for compute node ──────────────────────────────────────────
-if [[ -n "$1" ]]; then
-    COMPUTE_NODE="$1"
+if [[ -z "$1" ]]; then
+    # Try to read node from the file written by ollama_server.sbatch
+    NODE=$(ssh "${GAUTSCHI_USER}@${GAUTSCHI_LOGIN}" \
+        'cat $HOME/ollama_node.txt 2>/dev/null | grep NODE | cut -d= -f2' 2>/dev/null || true)
+    if [[ -z "$NODE" ]]; then
+        echo "Usage: bash gautschi_tunnel.sh <compute_node>"
+        echo ""
+        echo "To find your node:"
+        echo "  ssh ${GAUTSCHI_USER}@${GAUTSCHI_LOGIN} 'squeue -u ${GAUTSCHI_USER}'"
+        exit 1
+    fi
+    echo "Auto-detected node from cluster: ${NODE}"
 else
-    echo "Usage: bash gautschi_tunnel.sh <compute_node>"
-    echo ""
-    echo "To find your compute node:"
-    echo "  ssh ${GAUTSCHI_USER}@${GAUTSCHI_LOGIN} 'squeue -u ${GAUTSCHI_USER}'"
-    echo ""
-    echo "Example:"
-    echo "  bash gautschi_tunnel.sh gpu-a001"
-    exit 1
+    NODE="$1"
 fi
 
-echo "=== Opening SSH tunnel ==="
-echo "  Local  : localhost:${LOCAL_PORT}"
-echo "  Via    : ${GAUTSCHI_LOGIN}"
-echo "  Remote : ${COMPUTE_NODE}:${REMOTE_PORT}"
+echo "============================================================"
+echo "  Opening SSH tunnel"
+echo "  localhost:${LOCAL_PORT}  →  ${NODE}:${REMOTE_PORT}"
+echo "  via ${GAUTSCHI_LOGIN}"
 echo ""
-echo "Make sure OLLAMA_REMOTE_URL=http://localhost:${LOCAL_PORT} is in your .env"
-echo "Press Ctrl+C to close the tunnel."
+echo "  OLLAMA_REMOTE_URL=http://localhost:${LOCAL_PORT}"
+echo "  Press Ctrl+C to close."
+echo "============================================================"
 echo ""
 
-ssh -N -L "${LOCAL_PORT}:${COMPUTE_NODE}:${REMOTE_PORT}" \
-    "${GAUTSCHI_USER}@${GAUTSCHI_LOGIN}"
+# -J uses the login node as a jump host to reach the compute node directly
+ssh -N \
+    -L "${LOCAL_PORT}:localhost:${REMOTE_PORT}" \
+    -J "${GAUTSCHI_USER}@${GAUTSCHI_LOGIN}" \
+    "${GAUTSCHI_USER}@${NODE}"
