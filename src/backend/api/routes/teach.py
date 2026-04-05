@@ -157,20 +157,66 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
     # Get module + source chunks
     module, source_chunks = await _get_module_with_chunks(module_id)
 
+    # Check for existing active session for this student + module
+    # If one exists and isn't expired, resume it instead of creating a new one
+    existing_sessions = await supabase_query(
+        "sessions",
+        params={
+            "student_id": f"eq.{student_id}",
+            "module_id": f"eq.{module_id}",
+            "completed_at": "is.null",
+            "select": "id,mastery_score",
+        }
+    )
+
     # Get student memory for personalization
     memory = await get_student_memory(student_id, module_id)
-    prior_mastery = memory.get("prior_mastery", P_INIT)
+    prior_mastery = memory.get("prior_mastery", 0.0)
     recommended_strategy = memory.get("recommended_strategy", "direct")
     attempt_count = memory.get("attempt_count", 0)
 
-    # Create DB session
-    session_id = str(uuid.uuid4())
-    await supabase_query("sessions", method="POST", json={
-        "id": session_id,
-        "student_id": student_id,
-        "module_id": module_id,
-        "mastery_score": prior_mastery,
-    })
+    # Resume existing session if available and still in memory
+    if existing_sessions:
+        existing_id = existing_sessions[0]["id"]
+        existing_state = get_session(existing_id)
+        if existing_state:
+            # Session is live in memory — resume it
+            concepts = module.get("concepts", [])
+            total_concepts = len(concepts) if concepts else 1
+            concept_index = existing_state.get("concept_index", 0)
+            current_concept_title = ""
+            if concepts and concept_index < len(concepts):
+                current_concept_title = concepts[concept_index].get("title", "")
+            return StartSessionResponse(
+                session_id=existing_id,
+                student_id=student_id,
+                module_id=module_id,
+                attempt_number=existing_state.get("attempt_number", 1),
+                mastery_score=existing_state.get("mastery_probability", prior_mastery),
+                recommended_strategy=existing_state.get("teaching_strategy", recommended_strategy),
+                prior_mastery=existing_state.get("mastery_probability", prior_mastery),
+                concept_index=concept_index,
+                total_concepts=total_concepts,
+                current_concept_title=current_concept_title,
+            )
+        # Session exists in DB but not memory — use its mastery score
+        prior_mastery = existing_sessions[0].get("mastery_score", prior_mastery) or prior_mastery
+        session_id = existing_id
+        # Re-register in DB (update rather than insert)
+        await supabase_query(
+            f"sessions?id=eq.{session_id}",
+            method="PATCH",
+            json={"mastery_score": prior_mastery},
+        )
+    else:
+        # Create new DB session
+        session_id = str(uuid.uuid4())
+        await supabase_query("sessions", method="POST", json={
+            "id": session_id,
+            "student_id": student_id,
+            "module_id": module_id,
+            "mastery_score": prior_mastery,
+        })
 
     # Build initial LangGraph state
     # Get concepts from module
