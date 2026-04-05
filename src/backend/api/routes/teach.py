@@ -8,7 +8,7 @@ Flow:
   GET  /api/teach/{session_id}/history → full attempt history
 """
 from __future__ import annotations
-import asyncio, json, os, uuid
+import asyncio, json, os, uuid, time
 from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
@@ -30,8 +30,20 @@ router = APIRouter(prefix="/api/teach", tags=["teach"])
 MAX_ATTEMPTS = 5
 STRATEGY_MAP = {1: "direct", 2: "analogy", 3: "example", 4: "decompose"}
 
-# In-memory session store (keyed by session_id → TeachingState)
+# In-memory session store with expiry (2 hours)
 _sessions: dict[str, dict] = {}
+
+def get_session(session_id: str) -> dict | None:
+    entry = _sessions.get(session_id)
+    if not entry:
+        return None
+    if time.time() - entry["created_at"] > 7200:  # 2 hour expiry
+        del _sessions[session_id]
+        return None
+    return entry["state"]
+
+def set_session(session_id: str, state: dict):
+    _sessions[session_id] = {"state": state, "created_at": time.time()}
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -61,6 +73,7 @@ class ExplainResponse(BaseModel):
     concepts_missed: list[str]
     scores: dict[str, float]
     mastery_probability: float
+    mastery_score: float            # same as mastery_probability, for frontend compat
     advance: bool
     next_action: str                # "advance" | "reteach" | "recommend_prereqs" | "flag_review"
     prerequisite_modules: list[dict]
@@ -172,9 +185,10 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
     result = await teaching_graph.ainvoke(initial_state, config=config)
 
     # Store session state
-    _sessions[session_id] = dict(result)
-    _sessions[session_id]["module"] = module
-    _sessions[session_id]["source_chunks"] = source_chunks
+    s = dict(result)
+    s["module"] = module
+    s["source_chunks"] = source_chunks
+    set_session(session_id, s)
 
     return StartSessionResponse(
         session_id=session_id,
@@ -193,9 +207,9 @@ async def stream_explanation(
     strategy: str = Query(default=None),
 ) -> StreamingResponse:
     """SSE stream of the current teaching explanation."""
-    state = _sessions.get(session_id)
+    state = get_session(session_id)
     if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found. It may have expired. Start a new session.")
 
     # If strategy override provided, regenerate
     if strategy and strategy != state.get("teaching_strategy"):
@@ -225,9 +239,9 @@ async def stream_explanation(
 @router.post("/{session_id}/submit", response_model=ExplainResponse)
 async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainResponse:
     """Submit student explanation. Runs validate → route in LangGraph."""
-    state = _sessions.get(session_id)
+    state = get_session(session_id)
     if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found. It may have expired. Start a new session.")
 
     student_id = state["student_id"]
     module_id = state["module_id"]
@@ -289,7 +303,7 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         _sessions[session_id]["module"] = state["module"]
         _sessions[session_id]["source_chunks"] = state["source_chunks"]
     else:
-        _sessions.pop(session_id, None)
+        _sessions.pop(session_id, None)  # remove from expiry store too
 
     verdict = result.get("last_verdict", "NOT_YET")
     mastery = result.get("mastery_probability", 0.3)
@@ -312,6 +326,7 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         next_strategy=result.get("teaching_strategy"),
         overall_score=round(overall, 3),
         feedback=feedback,
+        mastery_score=mastery,
     )
 
 
