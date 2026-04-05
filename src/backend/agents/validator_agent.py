@@ -2,45 +2,57 @@
 agents/validator_agent.py
 Reference-Anchored Semantic Validator using GPT-4o.
 
-Two-stage pipeline:
-1. Generate/retrieve a reference answer for the module
-2. Compare student explanation semantically against the reference
-
-This replaces abstract rubric scoring which systematically underestimates correct answers.
+Architecture:
+1. Pre-filter catches non-answers (no LLM call) — in input_filter.py
+2. Generate or retrieve reference answer for this module
+3. Compare student explanation to reference semantically
+4. Single understanding_score (0-10), not multi-dimensional rubric
+5. Score-based reconciliation — score overrides verdict if they disagree
 """
 from __future__ import annotations
 import os, json
 from openai import AsyncOpenAI
 from api.db import supabase_query
 
-# BKT constants (kept for mastery probability tracking)
-P_INIT = 0.3
+# Initial mastery is 0 — not 0.3
+P_INIT = 0.0
 
-# In-memory cache for reference explanations (module_id -> reference_text)
+# In-memory reference cache: module_id -> reference text
 _reference_cache: dict[str, str] = {}
 
 VALIDATOR_SYSTEM_PROMPT = """You are an expert educator evaluating whether a student understood a concept.
 
-Your job is NOT to find everything they got wrong.
-Your job is to determine if they understood the CORE idea.
+YOUR JOB: Determine if the student understood the CORE IDEA. You are NOT looking for gaps.
 
 EVALUATION PHILOSOPHY:
 - A student who explains the core concept correctly in simple terms has understood it.
-- A student who uses correct domain vocabulary correctly has understood it.
-- A student should NOT be penalized for not mentioning things that weren't taught.
-- A student should NOT be penalized for using the same technical terms as the source material.
+- Correct technical vocabulary used correctly = evidence of understanding, NOT copying.
+- Students should only be evaluated on what they were taught, not on external knowledge.
 - Different words conveying the same correct meaning = full credit.
 - Partial understanding = partial credit. Not zero credit.
 
-CRITICAL RULES:
-1. If the student's explanation conveys the same core meaning as the reference answer, even in completely different words → MASTERED
-2. If the student got the main idea right but missed nuance → PARTIAL
-3. Only if the student fundamentally misunderstood or missed the core concept → NOT_YET
-4. If the student wrote fewer than 15 meaningful words → NOT_YET
-5. NEVER penalize for not mentioning things the reference answer doesn't mention either.
-6. Using correct technical terminology is a POSITIVE signal, not evidence of copying.
+SCORING (0-10):
+- 8-10: Student clearly understood the core concept → MASTERED
+- 5-7: Student got the main idea but missed some nuance → PARTIAL
+- 0-4: Student fundamentally misunderstood or barely engaged → NOT_YET
 
-Return ONLY valid JSON. No markdown. No preamble."""
+WHAT YOU ARE COMPARING:
+You receive a REFERENCE ANSWER — what a correct student explanation looks like.
+Ask: "Does this student's explanation convey the same core meaning as the reference?"
+If yes → MASTERED. If mostly → PARTIAL. If no → NOT_YET.
+
+DO NOT penalize for:
+- Using correct technical terms from the source material
+- Different sentence structure or word order
+- Shorter explanations that still capture the core idea
+- Not mentioning things the reference mentions if they demonstrated core understanding
+
+DO penalize for:
+- Getting the core concept factually wrong
+- Describing a completely different concept
+- Vague platitudes with no specific content
+
+Return ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
 
 async def _get_or_generate_reference(
@@ -48,63 +60,54 @@ async def _get_or_generate_reference(
     module: dict,
     source_chunks: list[str],
 ) -> str:
-    """Get reference explanation from cache/DB or generate on-the-fly."""
-    # Check in-memory cache first
-    if module_id in _reference_cache:
+    """Get reference explanation from cache/DB, or generate and cache."""
+    if module_id and module_id in _reference_cache:
         return _reference_cache[module_id]
 
     # Check DB
-    try:
-        rows = await supabase_query(
-            "assessments",
-            params={"module_id": f"eq.{module_id}", "select": "reference_explanation", "limit": "1"},
-        )
-        if rows and rows[0].get("reference_explanation"):
-            ref = rows[0]["reference_explanation"]
-            _reference_cache[module_id] = ref
-            return ref
-    except Exception:
-        pass
+    if module_id:
+        try:
+            rows = await supabase_query(
+                "module_references",
+                params={"module_id": f"eq.{module_id}", "select": "reference_explanation"},
+            )
+            if rows and rows[0].get("reference_explanation"):
+                ref = rows[0]["reference_explanation"]
+                _reference_cache[module_id] = ref
+                return ref
+        except Exception:
+            pass
 
-    # Generate on-the-fly with GPT-4o-mini
+    # Generate with GPT-4o-mini
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     module_content = "\n\n".join(chunk[:400] for chunk in source_chunks[:3]) if source_chunks else module.get("description", "")
     objectives = ", ".join(module.get("learning_objectives", [])[:3])
+    title = module.get("title", "this concept")
 
     try:
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": f"""Based on this module content:
-{module_content[:1000]}
-
-Learning objective: {objectives}
-
-Write a model student explanation (3-5 sentences) of '{module.get("title", "this concept")}'.
-Write it as a student explaining to a peer — not as a textbook definition.
-Show the core concept, why it matters, and one concrete implication.
-Use simple language. Do not add information not in the source material."""
-            }],
+            messages=[
+                {"role": "system", "content": "Write a model student explanation — 3-4 sentences, simple language. Write as if a student is explaining to a peer, not as a textbook. Do NOT mention what the source doesn't cover."},
+                {"role": "user", "content": f"Source material: {module_content[:800]}\nLearning objective: {objectives}\nModule: {title}\n\nWrite what a correct student explanation looks like. 3-4 sentences. Show core concept + why it matters + one concrete implication."},
+            ],
             max_tokens=200,
             temperature=0.3,
         )
         reference = response.choices[0].message.content.strip()
     except Exception:
-        # Fallback: use module description as reference
-        reference = module.get("description", f"A correct explanation of {module.get('title', 'this concept')} would cover: {objectives}")
+        reference = f"A correct explanation of {title} would cover: {objectives}"
 
-    _reference_cache[module_id] = reference
-
-    # Cache in DB asynchronously (non-blocking)
-    try:
-        await supabase_query(
-            f"assessments?module_id=eq.{module_id}",
-            method="PATCH",
-            json={"reference_explanation": reference},
-        )
-    except Exception:
-        pass
+    if module_id:
+        _reference_cache[module_id] = reference
+        try:
+            await supabase_query(
+                "module_references",
+                method="POST",
+                json={"module_id": module_id, "reference_explanation": reference},
+            )
+        except Exception:
+            pass
 
     return reference
 
@@ -117,84 +120,43 @@ async def validate_explanation(
     attempt_number: int = 1,
     agent_explanation: str = "",
 ) -> dict:
-    """
-    Reference-anchored semantic validation using GPT-4o.
-
-    Returns full result dict compatible with both old and new field names.
-    """
+    """Main validation. Returns complete result dict."""
     module_id = module.get("id", module.get("module_id", ""))
     module_title = module.get("title", "this concept")
     objectives = ", ".join(module.get("learning_objectives", [])[:3])
 
-    # ── Short-circuit trivial/empty responses ──────────────────
-    word_count = len(student_explanation.strip().split())
-    trivial_phrases = {
-        "i don't know", "i dont know", "not sure", "no idea", "idk",
-        "i'm not sure", "i understand", "i understand ✓", "i get it",
-        "yes", "ok", "okay", "got it", "understood", "skip", "pass",
-    }
-    cleaned = student_explanation.strip().lower().rstrip("✓ .,!")
-    if cleaned in trivial_phrases or word_count < 10:
-        return _build_result(
-            verdict="NOT_YET",
-            score=0,
-            pain_point="No real explanation was provided.",
-            feedback="Please explain the concept in your own words — at least 2-3 sentences showing what you understood. What does this concept do and why does it matter?",
-            what_right="",
-            concepts_missed=[module_title],
-            prior_mastery=prior_mastery,
-            attempt_number=attempt_number,
-        )
-
-    # ── Get reference answer ────────────────────────────────────
+    # Get reference answer
     reference = await _get_or_generate_reference(module_id, module, source_chunks)
 
-    # ── Build source context (limited to avoid token overflow) ──
-    source_context = "\n---\n".join(chunk[:400] for chunk in source_chunks[:2]) if source_chunks else module.get("description", "")
+    # Truncate agent explanation to max 150 words
+    agent_words = agent_explanation.split()[:150] if agent_explanation else []
+    agent_truncated = " ".join(agent_words) if agent_words else "(not available)"
 
-    # ── Call GPT-4o for semantic validation ─────────────────────
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-    prompt = f"""CONCEPT BEING TAUGHT: {module_title}
+    prompt = f"""CONCEPT: {module_title}
 LEARNING OBJECTIVE: {objectives}
 
-WHAT THE TEACHING AGENT EXPLAINED TO THE STUDENT:
-{agent_explanation[:600] if agent_explanation else "(not available)"}
-
-REFERENCE ANSWER (what a correct student explanation looks like):
+WHAT CORRECT UNDERSTANDING LOOKS LIKE (reference answer):
 {reference}
 
-SOURCE MATERIAL (what was available to teach from):
-{source_context[:500]}
+WHAT THE TEACHING AGENT EXPLAINED TO THE STUDENT:
+{agent_truncated}
 
 STUDENT'S EXPLANATION (attempt {attempt_number} of 5):
 {student_explanation}
 
-Evaluate: Does the student's explanation demonstrate understanding of the core concept?
-
-Compare semantically to the REFERENCE ANSWER.
-Ask: "Does the student's explanation convey the same core meaning, even in different words?"
-
-Score 0-10 for understanding:
-- 8-10: Student clearly understood — covers core idea, may use different words
-- 5-7: Student partially understood — got main idea, missed some nuance
-- 2-4: Student has some awareness but fundamental gaps
-- 0-1: Student did not demonstrate understanding
-
-Verdict rules:
-- understanding_score >= 7 → MASTERED
-- understanding_score 4-6 → PARTIAL
-- understanding_score <= 3 → NOT_YET
+Evaluate: Does the student's explanation convey the same core meaning as the reference answer?
 
 Return JSON:
 {{
-  "verdict": "MASTERED",
-  "understanding_score": 8,
-  "pain_point": "",
-  "feedback_to_student": "You clearly understood the core concept. Well done.",
-  "concepts_missed": [],
-  "what_they_got_right": "You correctly explained that threat modeling is a systematic process for identifying vulnerabilities in agentic AI systems before they are exploited."
+  "understanding_score": <0-10>,
+  "verdict": "MASTERED" | "PARTIAL" | "NOT_YET",
+  "what_they_got_right": "<one sentence: what they understood correctly. NEVER empty — always find something positive.>",
+  "pain_point": "<If PARTIAL/NOT_YET: one precise sentence about the specific gap. If MASTERED: empty string.>",
+  "feedback_to_student": "<Two sentences. Start with what they got right. Then specific guidance if needed. Never say 'Good effort' generically.>",
+  "concepts_missed": ["<only concepts in the reference that were clearly absent from student explanation>"]
 }}"""
+
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     try:
         response = await client.chat.completions.create(
@@ -203,13 +165,13 @@ Return JSON:
                 {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=400,
+            max_tokens=350,
             temperature=0.1,
             response_format={"type": "json_object"},
         )
         result = json.loads(response.choices[0].message.content)
-    except Exception as e:
-        # Fallback: use Groq if OpenAI fails
+    except Exception:
+        # Fallback to Groq
         try:
             from groq import Groq
             gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -221,62 +183,62 @@ Return JSON:
                 ],
                 temperature=0.1,
                 response_format={"type": "json_object"},
-                max_tokens=400,
+                max_tokens=350,
             )
             result = json.loads(gr.choices[0].message.content)
         except Exception:
-            # Last resort: give partial credit if explanation is substantive
+            # Last resort: give partial credit for substantive responses
             result = {
-                "verdict": "PARTIAL",
                 "understanding_score": 5,
-                "pain_point": "",
-                "feedback_to_student": "Good effort! Your explanation shows engagement with the material. Keep building on this.",
+                "verdict": "PARTIAL",
+                "what_they_got_right": "You provided a substantive explanation showing engagement with the material.",
+                "pain_point": "Could not fully evaluate — please try again.",
+                "feedback_to_student": "Your explanation showed effort. Please try submitting again for a full evaluation.",
                 "concepts_missed": [],
-                "what_they_got_right": "You provided a substantive explanation.",
             }
 
-    # ── Override verdict with score (prevent LLM inconsistency) ─
-    score = int(result.get("understanding_score", 5))
-    score = max(0, min(10, score))
+    # Score-based reconciliation — trust score over label
+    score = max(0, min(10, int(result.get("understanding_score", 5))))
 
-    # Score overrides LLM verdict if they disagree significantly
-    if result.get("verdict") == "NOT_YET" and score >= 7:
+    if score >= 8:
         result["verdict"] = "MASTERED"
-    elif result.get("verdict") == "MASTERED" and score < 5:
-        result["verdict"] = "PARTIAL"
-    elif result.get("verdict") == "PARTIAL" and score >= 8:
-        result["verdict"] = "MASTERED"
+    elif score >= 5:
+        if result.get("verdict") == "MASTERED":
+            result["verdict"] = "PARTIAL"
+        elif result.get("verdict") == "NOT_YET":
+            result["verdict"] = "PARTIAL"
+    else:
+        if result.get("verdict") == "MASTERED":
+            result["verdict"] = "PARTIAL"
 
     verdict = result["verdict"]
-    pain_point = result.get("pain_point", "") if verdict != "MASTERED" else ""
-    feedback = result.get("feedback_to_student", "")
-    what_right = result.get("what_they_got_right", "")
-    concepts_missed = result.get("concepts_missed", [])
+
+    # Clean up fields
+    if verdict == "MASTERED":
+        result["pain_point"] = ""
+        result["concepts_missed"] = []
+
+    if not result.get("what_they_got_right"):
+        result["what_they_got_right"] = "You engaged with the concept and made a genuine attempt to explain it."
 
     return _build_result(
         verdict=verdict,
         score=score,
-        pain_point=pain_point,
-        feedback=feedback,
-        what_right=what_right,
-        concepts_missed=concepts_missed,
+        pain_point=result.get("pain_point", ""),
+        feedback=result.get("feedback_to_student", ""),
+        what_right=result.get("what_they_got_right", ""),
+        concepts_missed=result.get("concepts_missed", []),
         prior_mastery=prior_mastery,
         attempt_number=attempt_number,
     )
 
 
 def _build_result(
-    verdict: str,
-    score: int,
-    pain_point: str,
-    feedback: str,
-    what_right: str,
-    concepts_missed: list,
-    prior_mastery: float,
-    attempt_number: int,
+    verdict: str, score: int, pain_point: str, feedback: str,
+    what_right: str, concepts_missed: list,
+    prior_mastery: float, attempt_number: int,
 ) -> dict:
-    """Build unified result dict with all fields both old and new code expects."""
-    # Mastery update
+    """Build unified result dict."""
     if verdict == "MASTERED":
         new_mastery = min(1.0, prior_mastery + 0.25)
     elif verdict == "PARTIAL":
@@ -284,11 +246,10 @@ def _build_result(
     else:
         new_mastery = max(0.0, prior_mastery - 0.02)
 
-    next_strategy_map = {1: "direct", 2: "analogy", 3: "example", 4: "decompose"}
+    strategy_map = {1: "direct", 2: "analogy", 3: "example", 4: "decompose"}
     next_attempt = attempt_number + 1
-    next_strategy = next_strategy_map.get(next_attempt, "decompose")
+    next_strategy = strategy_map.get(next_attempt, "decompose")
 
-    # Normalised 0-1 scores for legacy compat
     norm = score / 10.0
     scores = {
         "core_idea": round(norm, 2),
@@ -298,23 +259,20 @@ def _build_result(
     }
 
     return {
-        # New fields
         "verdict": verdict,
+        "last_verdict": verdict,
         "understanding_score": score,
         "pain_point": pain_point,
         "feedback_to_student": feedback,
         "what_they_got_right": what_right,
         "concepts_missed": concepts_missed,
-        # Legacy compat fields
-        "last_verdict": verdict,
         "scores": scores,
         "overall_score": round(norm, 3),
         "mastery_probability": round(new_mastery, 3),
+        "mastery_score": round(new_mastery, 3),
         "advance": verdict == "MASTERED",
         "next_strategy": next_strategy,
-        "needs_real_explanation": False,
-        # For LangGraph state
         "should_advance": verdict == "MASTERED",
         "should_flag": next_attempt >= 5 and verdict != "MASTERED",
-        "mastery_score": round(new_mastery, 3),
+        "needs_real_explanation": False,
     }
