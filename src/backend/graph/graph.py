@@ -55,6 +55,7 @@ async def validator_node(state: TeachingState) -> dict[str, Any]:
         source_chunks=state.get("source_chunks", []),
         prior_mastery=prior_mastery,
         attempt_number=attempt,
+        agent_explanation=state.get("agent_explanation", state.get("current_explanation", "")),
     )
 
     # Accumulate pain points
