@@ -1,458 +1,206 @@
 """
 api/routes/dashboard.py
-Professor analytics dashboard: stats, heatmaps, interventions, and LMS export.
+Professor dashboard: stats, heatmap with pain points, interventions, LMS export, assignment generation.
 """
 from __future__ import annotations
-
-import json
-from typing import Any
-
+import os, json, uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-
 from api.db import supabase_query
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
-# ─────────────────────────────────────────────────────────
-# Response models
-# ─────────────────────────────────────────────────────────
-
-class CourseStats(BaseModel):
-    course_id: str
-    title: str
-    enrollment_count: int
-    avg_mastery: float
-    completion_rate: float
-    module_count: int
-    assessment_count: int
-
-
-class HeatmapCell(BaseModel):
-    student_id: str
-    student_name: str
-    module_id: str
-    module_title: str
-    mastery_score: float
-    completed: bool
-
-
-class HeatmapResponse(BaseModel):
-    course_id: str
-    modules: list[dict[str, str]]   # [{id, title}]
-    students: list[dict[str, str]]  # [{id, name}]
-    cells: list[HeatmapCell]
-
-
-class InterventionStudent(BaseModel):
-    student_id: str
-    student_name: str
-    student_email: str
-    avg_mastery: float
-    low_mastery_modules: list[dict[str, Any]]  # [{module_id, module_title, mastery}]
-
-
-# ─────────────────────────────────────────────────────────
-# Helper
-# ─────────────────────────────────────────────────────────
-
-async def _verify_course(course_id: str) -> dict[str, Any]:
-    """Fetch course or raise 404."""
-    courses = await supabase_query(
-        "courses",
-        params={"id": f"eq.{course_id}", "select": "id,title"},
-    )
-    if not courses:
-        raise HTTPException(status_code=404, detail=f"Course {course_id} not found.")
-    return courses[0]
-
-
-# ─────────────────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────────────────
-
-@router.get("/{course_id}/stats", response_model=CourseStats)
-async def get_course_stats(course_id: str) -> CourseStats:
-    """
-    Return overall course analytics:
-      - Enrollment count
-      - Average mastery across all completed sessions
-      - Completion rate (% of enrolled students with ≥1 completed session)
-      - Module and assessment counts
-    """
-    course = await _verify_course(course_id)
-
-    # Enrollment count
-    enrollments = await supabase_query(
-        "enrollments",
-        params={"course_id": f"eq.{course_id}", "select": "id,student_id"},
-    )
-    enrollment_count = len(enrollments)
-
-    # Module count
-    modules = await supabase_query(
-        "modules",
-        params={"course_id": f"eq.{course_id}", "select": "id"},
-    )
-    module_count = len(modules)
-
-    # Assessment count
-    assessment_count = 0
-    if modules:
-        module_ids = [m["id"] for m in modules]
-        id_list = "(" + ",".join(module_ids) + ")"
-        assessments = await supabase_query(
-            "assessments",
-            params={"module_id": f"in.{id_list}", "select": "id"},
-        )
-        assessment_count = len(assessments)
-
-    # Session stats: avg mastery & completion rate
-    avg_mastery = 0.0
-    completion_rate = 0.0
-
-    if enrollment_count > 0 and modules:
-        # Get all sessions for this course's modules
-        id_list = "(" + ",".join([m["id"] for m in modules]) + ")"
-        sessions = await supabase_query(
-            "sessions",
-            params={
-                "module_id": f"in.{id_list}",
-                "select": "student_id,mastery_score,completed_at",
-            },
-        )
-
-        if sessions:
-            all_mastery = [s["mastery_score"] for s in sessions if s.get("mastery_score") is not None]
-            avg_mastery = sum(all_mastery) / len(all_mastery) if all_mastery else 0.0
-
-            # Students with at least one completed session
-            completed_student_ids = {
-                s["student_id"] for s in sessions if s.get("completed_at")
-            }
-            enrolled_student_ids = {e["student_id"] for e in enrollments}
-            completing_students = completed_student_ids & enrolled_student_ids
-            completion_rate = len(completing_students) / enrollment_count
-
-    return CourseStats(
-        course_id=course_id,
-        title=course["title"],
-        enrollment_count=enrollment_count,
-        avg_mastery=round(avg_mastery, 4),
-        completion_rate=round(completion_rate, 4),
-        module_count=module_count,
-        assessment_count=assessment_count,
-    )
-
-
-@router.get("/{course_id}/heatmap", response_model=HeatmapResponse)
-async def get_course_heatmap(course_id: str) -> HeatmapResponse:
-    """
-    Return a module × student mastery heatmap.
-
-    Each cell represents the best mastery score a student achieved
-    for a given module (highest mastery_score from all their sessions).
-    """
-    await _verify_course(course_id)
-
-    # Fetch modules
-    modules = await supabase_query(
-        "modules",
-        params={
-            "course_id": f"eq.{course_id}",
-            "select": "id,title",
-            "order": "order_index.asc",
-        },
-    )
-    if not modules:
-        return HeatmapResponse(course_id=course_id, modules=[], students=[], cells=[])
-
-    # Fetch enrolled students
-    enrollments = await supabase_query(
-        "enrollments",
-        params={"course_id": f"eq.{course_id}", "select": "student_id"},
-    )
-    if not enrollments:
-        return HeatmapResponse(
-            course_id=course_id,
-            modules=[{"id": m["id"], "title": m["title"]} for m in modules],
-            students=[],
-            cells=[],
-        )
-
-    student_ids = list({e["student_id"] for e in enrollments})
-    id_list_students = "(" + ",".join(student_ids) + ")"
-
-    # Fetch student details
-    students_raw = await supabase_query(
-        "students",
-        params={
-            "id": f"in.{id_list_students}",
-            "select": "id,name",
-        },
-    )
-    student_map = {s["id"]: s["name"] for s in students_raw}
-
-    # Fetch all sessions for these modules
+@router.get("/{course_id}/stats")
+async def get_stats(course_id: str):
+    enrollments = await supabase_query("enrollments", params={"course_id": f"eq.{course_id}", "select": "id,student_id"})
+    modules = await supabase_query("modules", params={"course_id": f"eq.{course_id}", "select": "id"})
     module_ids = [m["id"] for m in modules]
-    id_list_modules = "(" + ",".join(module_ids) + ")"
-    sessions = await supabase_query(
-        "sessions",
-        params={
-            "module_id": f"in.{id_list_modules}",
-            "student_id": f"in.{id_list_students}",
-            "select": "student_id,module_id,mastery_score,completed_at",
-        },
-    )
-
-    # Build best-mastery map: (student_id, module_id) → max mastery_score
-    best_mastery: dict[tuple[str, str], float] = {}
-    completed_map: dict[tuple[str, str], bool] = {}
-    for s in sessions:
-        key = (s["student_id"], s["module_id"])
-        current_best = best_mastery.get(key, 0.0)
-        score = s.get("mastery_score") or 0.0
-        if score > current_best:
-            best_mastery[key] = score
-        if s.get("completed_at"):
-            completed_map[key] = True
-
-    # Build cells
-    cells: list[HeatmapCell] = []
-    for student_id in student_ids:
-        for module in modules:
-            module_id = module["id"]
-            key = (student_id, module_id)
-            mastery = best_mastery.get(key, 0.0)
-            completed = completed_map.get(key, False)
-            cells.append(
-                HeatmapCell(
-                    student_id=student_id,
-                    student_name=student_map.get(student_id, "Unknown"),
-                    module_id=module_id,
-                    module_title=module["title"],
-                    mastery_score=round(mastery, 4),
-                    completed=completed,
-                )
-            )
-
-    return HeatmapResponse(
-        course_id=course_id,
-        modules=[{"id": m["id"], "title": m["title"]} for m in modules],
-        students=[{"id": sid, "name": student_map.get(sid, "Unknown")} for sid in student_ids],
-        cells=cells,
-    )
+    
+    sessions = []
+    if module_ids:
+        id_list = "(" + ",".join(module_ids) + ")"
+        sessions = await supabase_query("sessions", params={"module_id": f"in.{id_list}", "select": "mastery_score,completed_at,student_id"})
+    
+    enrollment_count = len(enrollments)
+    avg_mastery = round(sum(s.get("mastery_score", 0) for s in sessions) / len(sessions), 3) if sessions else 0.0
+    completed = sum(1 for s in sessions if s.get("completed_at"))
+    completion_rate = round(completed / len(sessions), 3) if sessions else 0.0
+    
+    return {
+        "enrollment_count": enrollment_count,
+        "avg_mastery": avg_mastery,
+        "completion_rate": completion_rate,
+        "module_count": len(modules),
+        "total_sessions": len(sessions),
+    }
 
 
-@router.get("/{course_id}/interventions", response_model=list[InterventionStudent])
-async def get_interventions(course_id: str) -> list[InterventionStudent]:
-    """
-    List students with average mastery below 0.4 — candidates for intervention.
+@router.get("/{course_id}/heatmap")
+async def get_heatmap(course_id: str):
+    modules = await supabase_query("modules", params={"course_id": f"eq.{course_id}", "select": "id,title,order_index"})
+    modules_sorted = sorted(modules, key=lambda m: m.get("order_index", 0))
+    
+    enrollments = await supabase_query("enrollments", params={"course_id": f"eq.{course_id}", "select": "student_id"})
+    student_ids = list(set(e["student_id"] for e in enrollments))
+    
+    students = []
+    for sid in student_ids:
+        s = await supabase_query("students", params={"id": f"eq.{sid}", "select": "id,name,email"})
+        if s:
+            students.append(s[0])
+    
+    module_ids = [m["id"] for m in modules_sorted]
+    all_sessions = []
+    if module_ids:
+        id_list = "(" + ",".join(module_ids) + ")"
+        all_sessions = await supabase_query("sessions", params={"module_id": f"in.{id_list}", "select": "id,student_id,module_id,mastery_score,completed_at"})
+    
+    # Get pain points from kc_attempts
+    session_ids = [s["id"] for s in all_sessions]
+    pain_point_map = {}  # (student_id, module_id) -> pain_point
+    if session_ids:
+        id_list = "(" + ",".join(session_ids[:200]) + ")"
+        attempts = await supabase_query("kc_attempts", params={
+            "session_id": f"in.{id_list}",
+            "select": "session_id,validator_scores,created_at",
+        })
+        # Sort by created_at desc to get latest
+        attempts_sorted = sorted(attempts, key=lambda a: a.get("created_at", ""), reverse=True)
+        session_to_student_module = {s["id"]: (s["student_id"], s["module_id"]) for s in all_sessions}
+        
+        for attempt in attempts_sorted:
+            scores = attempt.get("validator_scores", {}) or {}
+            verdict = scores.get("verdict", "")
+            pain = scores.get("pain_point", "")
+            sid = attempt.get("session_id", "")
+            key = session_to_student_module.get(sid)
+            if key and key not in pain_point_map and verdict != "MASTERED" and pain:
+                pain_point_map[key] = pain
+    
+    cells = []
+    for student in students:
+        for module in modules_sorted:
+            mod_sessions = [s for s in all_sessions if s["student_id"] == student["id"] and s["module_id"] == module["id"]]
+            attempts_count = len(mod_sessions)
+            best_mastery = max((s.get("mastery_score", 0) for s in mod_sessions), default=0.0)
+            
+            if attempts_count == 0:
+                status = "not_started"
+            elif best_mastery >= 0.75:
+                status = "mastered"
+            elif attempts_count >= 5 and best_mastery < 0.4:
+                status = "needs_review"
+            else:
+                status = "in_progress"
+            
+            pain_point = pain_point_map.get((student["id"], module["id"]), "")
+            
+            cells.append({
+                "student_id": student["id"],
+                "module_id": module["id"],
+                "mastery_score": round(best_mastery, 3),
+                "status": status,
+                "attempts": attempts_count,
+                "latest_pain_point": pain_point,
+            })
+    
+    return {
+        "modules": [{"id": m["id"], "title": m["title"], "module_order": m.get("order_index", 0)} for m in modules_sorted],
+        "students": students,
+        "cells": cells,
+    }
 
-    Returns student details + which specific modules are low-mastery.
-    """
-    await _verify_course(course_id)
 
-    # Fetch enrolled students
-    enrollments = await supabase_query(
-        "enrollments",
-        params={"course_id": f"eq.{course_id}", "select": "student_id"},
-    )
-    if not enrollments:
-        return []
-
-    student_ids = list({e["student_id"] for e in enrollments})
-
-    # Fetch student details
-    id_list_students = "(" + ",".join(student_ids) + ")"
-    students_raw = await supabase_query(
-        "students",
-        params={
-            "id": f"in.{id_list_students}",
-            "select": "id,name,email",
-        },
-    )
-    student_map = {s["id"]: s for s in students_raw}
-
-    # Fetch modules
-    modules = await supabase_query(
-        "modules",
-        params={"course_id": f"eq.{course_id}", "select": "id,title"},
-    )
-    if not modules:
-        return []
-
+@router.get("/{course_id}/interventions")
+async def get_interventions(course_id: str):
+    modules = await supabase_query("modules", params={"course_id": f"eq.{course_id}", "select": "id,title"})
     module_map = {m["id"]: m["title"] for m in modules}
     module_ids = list(module_map.keys())
-    id_list_modules = "(" + ",".join(module_ids) + ")"
-
-    # Fetch sessions
-    sessions = await supabase_query(
-        "sessions",
-        params={
-            "module_id": f"in.{id_list_modules}",
-            "student_id": f"in.{id_list_students}",
-            "select": "student_id,module_id,mastery_score",
-        },
-    )
-
-    # Compute per-student, per-module best mastery
-    student_module_mastery: dict[str, dict[str, float]] = {}
-    for s in sessions:
-        sid = s["student_id"]
-        mid = s["module_id"]
-        score = s.get("mastery_score") or 0.0
-        student_module_mastery.setdefault(sid, {})
-        current = student_module_mastery[sid].get(mid, 0.0)
-        if score > current:
-            student_module_mastery[sid][mid] = score
-
-    INTERVENTION_THRESHOLD = 0.4
-    result: list[InterventionStudent] = []
-
-    for student_id in student_ids:
-        module_scores = student_module_mastery.get(student_id, {})
-        if not module_scores:
-            # No activity yet — flag as needing intervention
-            avg_mastery = 0.0
-        else:
-            avg_mastery = sum(module_scores.values()) / len(module_scores)
-
-        if avg_mastery < INTERVENTION_THRESHOLD:
-            low_mastery_mods = [
-                {
+    
+    enrollments = await supabase_query("enrollments", params={"course_id": f"eq.{course_id}", "select": "student_id"})
+    student_ids = list(set(e["student_id"] for e in enrollments))
+    
+    interventions = []
+    for sid in student_ids:
+        student = await supabase_query("students", params={"id": f"eq.{sid}", "select": "id,name,email"})
+        if not student:
+            continue
+        student = student[0]
+        
+        if not module_ids:
+            continue
+        id_list = "(" + ",".join(module_ids) + ")"
+        sessions = await supabase_query("sessions", params={"student_id": f"eq.{sid}", "module_id": f"in.{id_list}", "select": "id,module_id,mastery_score,completed_at"})
+        
+        if not sessions:
+            continue
+        
+        avg_mastery = sum(s.get("mastery_score", 0) for s in sessions) / len(sessions)
+        if avg_mastery >= 0.5:
+            continue  # Not at risk
+        
+        # Find stuck modules
+        stuck = {}
+        for s in sessions:
+            mid = s["module_id"]
+            if mid not in stuck:
+                stuck[mid] = {"attempts": 0, "best_mastery": 0, "session_ids": []}
+            stuck[mid]["attempts"] += 1
+            stuck[mid]["best_mastery"] = max(stuck[mid]["best_mastery"], s.get("mastery_score", 0))
+            stuck[mid]["session_ids"].append(s["id"])
+        
+        stuck_modules = []
+        for mid, data in stuck.items():
+            if data["best_mastery"] < 0.5 and data["attempts"] >= 2:
+                # Get pain points
+                pain_points = []
+                if data["session_ids"]:
+                    sess_id_list = "(" + ",".join(data["session_ids"]) + ")"
+                    attempts_data = await supabase_query("kc_attempts", params={"session_id": f"in.{sess_id_list}", "select": "validator_scores"})
+                    for a in attempts_data:
+                        scores = a.get("validator_scores", {}) or {}
+                        pain = scores.get("pain_point", "")
+                        if pain and pain not in pain_points:
+                            pain_points.append(pain)
+                
+                # Get prereq recommendations
+                prereqs = await supabase_query("student_prerequisite_recommendations", params={"student_id": f"eq.{sid}", "module_id": f"eq.{mid}", "select": "topic"})
+                prereq_topics = [p["topic"] for p in prereqs]
+                
+                stuck_modules.append({
                     "module_id": mid,
                     "module_title": module_map.get(mid, "Unknown"),
-                    "mastery": round(score, 4),
-                }
-                for mid, score in module_scores.items()
-                if score < INTERVENTION_THRESHOLD
-            ]
-            # Sort by mastery ascending
-            low_mastery_mods.sort(key=lambda x: x["mastery"])
-
-            student_info = student_map.get(student_id, {})
-            result.append(
-                InterventionStudent(
-                    student_id=student_id,
-                    student_name=student_info.get("name", "Unknown"),
-                    student_email=student_info.get("email", ""),
-                    avg_mastery=round(avg_mastery, 4),
-                    low_mastery_modules=low_mastery_mods,
-                )
-            )
-
-    # Sort by avg_mastery ascending (worst first)
-    result.sort(key=lambda x: x.avg_mastery)
-    return result
+                    "attempts": data["attempts"],
+                    "pain_points": pain_points[:3],
+                    "recommended_prerequisites": prereq_topics,
+                })
+        
+        if stuck_modules:
+            interventions.append({
+                "student_id": sid,
+                "student_name": student.get("name", "Unknown"),
+                "avg_mastery": round(avg_mastery, 3),
+                "severity": "high" if avg_mastery < 0.3 else "medium",
+                "stuck_modules": stuck_modules,
+            })
+    
+    return interventions
 
 
 @router.get("/{course_id}/export")
-async def export_course(course_id: str) -> JSONResponse:
-    """
-    Export the full course as an LMS-compatible JSON package.
-
-    Includes: course metadata, modules, prerequisites, learning objectives,
-    assessments, and aggregate student performance data.
-    """
-    course = await _verify_course(course_id)
-
-    # Fetch modules
-    modules = await supabase_query(
-        "modules",
-        params={
-            "course_id": f"eq.{course_id}",
-            "select": "id,title,description,learning_objectives,order_index,estimated_minutes,source_type,faithfulness_verdict",
-            "order": "order_index.asc",
-        },
-    )
-
-    module_ids = [m["id"] for m in modules]
-    id_list = "(" + ",".join(module_ids) + ")" if module_ids else "()"
-
-    # Prerequisites
-    prereqs: list[dict[str, Any]] = []
-    if module_ids:
-        prereqs = await supabase_query(
-            "prerequisites",
-            params={
-                "module_id": f"in.{id_list}",
-                "select": "module_id,prerequisite_module_id",
-            },
-        )
-
-    # Assessments
-    assessments: list[dict[str, Any]] = []
-    if module_ids:
-        assessments = await supabase_query(
-            "assessments",
-            params={
-                "module_id": f"in.{id_list}",
-                "select": "id,module_id,question,question_type,options,correct_answer,difficulty_tier",
-            },
-        )
-
-    # Enrollment count
-    enrollments = await supabase_query(
-        "enrollments",
-        params={"course_id": f"eq.{course_id}", "select": "id"},
-    )
-
-    # Build assessment map
-    assessments_by_module: dict[str, list[dict[str, Any]]] = {}
-    for a in assessments:
-        assessments_by_module.setdefault(a["module_id"], []).append(
-            {
-                "id": a["id"],
-                "question": a["question"],
-                "question_type": a["question_type"],
-                "options": a.get("options"),
-                "correct_answer": a["correct_answer"],
-                "difficulty_tier": a["difficulty_tier"],
-            }
-        )
-
-    # Build prereq map
-    prereq_map: dict[str, list[str]] = {}
-    for p in prereqs:
-        prereq_map.setdefault(p["module_id"], []).append(p["prerequisite_module_id"])
-
-    lms_export = {
-        "schema_version": "1.0.0",
-        "platform": "Assign B2B",
-        "course": {
-            "id": course["id"],
-            "title": course["title"],
-            "enrollment_count": len(enrollments),
-        },
-        "modules": [
-            {
-                "id": m["id"],
-                "title": m["title"],
-                "description": m.get("description", ""),
-                "learning_objectives": m.get("learning_objectives") or [],
-                "order_index": m.get("order_index", 0),
-                "estimated_minutes": m.get("estimated_minutes", 30),
-                "source_type": m.get("source_type", "material"),
-                "faithfulness_verdict": m.get("faithfulness_verdict"),
-                "prerequisite_module_ids": prereq_map.get(m["id"], []),
-                "assessments": assessments_by_module.get(m["id"], []),
-            }
-            for m in modules
-        ],
-        "metadata": {
-            "total_modules": len(modules),
-            "total_assessments": len(assessments),
-            "total_enrolled": len(enrollments),
-        },
+async def export_lms(course_id: str):
+    course = await supabase_query("courses", params={"id": f"eq.{course_id}", "select": "id,title,description"})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    modules = await supabase_query("modules", params={"course_id": f"eq.{course_id}", "select": "id,title,description,learning_objectives,order_index,estimated_minutes"})
+    modules_sorted = sorted(modules, key=lambda m: m.get("order_index", 0))
+    
+    export = {
+        "course": course[0],
+        "modules": modules_sorted,
+        "scorm_version": "2004",
+        "export_format": "json",
     }
-
-    return JSONResponse(
-        content=lms_export,
-        headers={
-            "Content-Disposition": f'attachment; filename="course_{course_id}.json"',
-            "Content-Type": "application/json",
-        },
-    )
+    return JSONResponse(content=export)
