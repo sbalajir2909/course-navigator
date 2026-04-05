@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from api.db import supabase_query
 from agents.teaching_agent import teach_concept
 from agents.validator_agent import validate_explanation, P_INIT
+from agents.input_filter import filter_student_input
 from agents.student_memory import get_student_memory
 from graph.graph import (
     teaching_graph, get_thread_id,
@@ -70,7 +71,7 @@ class ExplainRequest(BaseModel):
 class ExplainResponse(BaseModel):
     session_id: str
     attempt_number: int
-    verdict: str                    # MASTERED | PARTIAL | NOT_YET
+    verdict: str                    # MASTERED | PARTIAL | NOT_YET | INVALID_INPUT
     pain_point: str
     feedback_to_student: str
     concepts_missed: list[str]
@@ -251,6 +252,31 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
     module_id = state["module_id"]
     attempt_number = state.get("attempt_number", 1)
 
+    # PRE-FILTER — runs before any LLM call, no attempt counted
+    # Skip filter for MCQ-style inputs (start with "Selected:")
+    if not body.explanation.startswith("Selected:"):
+        filter_result = filter_student_input(body.explanation)
+        if not filter_result["is_valid"]:
+            current_mastery = state.get("mastery_probability", 0.0)
+            return ExplainResponse(
+                session_id=session_id,
+                attempt_number=attempt_number,  # NOT incremented
+                verdict="INVALID_INPUT",
+                pain_point="",
+                feedback_to_student=filter_result["rejection_reason"],
+                concepts_missed=[],
+                scores={},
+                mastery_probability=current_mastery,
+                mastery_score=current_mastery,
+                advance=False,
+                next_action="explain_back",
+                prerequisite_modules=[],
+                next_strategy=None,
+                overall_score=0.0,
+                feedback=filter_result["rejection_reason"],
+                what_they_got_right="",
+            )
+
     # Update state with student response
     state["student_response"] = body.explanation
     # Pass agent explanation for reference-anchored validation
@@ -312,7 +338,7 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
     else:
         _sessions.pop(session_id, None)
 
-    verdict = result.get("last_verdict", "NOT_YET")
+    verdict = result.get("last_verdict") or result.get("verdict") or "NOT_YET"
     mastery = result.get("mastery_probability", 0.3)
     feedback = result.get("feedback_to_student", "")
     scores = result.get("scores", {})
