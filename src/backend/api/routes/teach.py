@@ -277,76 +277,93 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
                 what_they_got_right="",
             )
 
-    # Update state with student response
-    state["student_response"] = body.explanation
-    # Pass agent explanation for reference-anchored validation
-    state["agent_explanation"] = state.get("current_explanation", "")
+    # Get agent's last explanation for reference-anchored validation
+    agent_explanation = state.get("current_explanation", "")
 
-    # Run validate → route via graph
-    thread_id = get_thread_id(student_id, module_id)
-    config = {"configurable": {"thread_id": thread_id}}
-    result = await teaching_graph.ainvoke(state, config=config)
+    # Call validator DIRECTLY — no LangGraph, no state-mangling
+    prior_mastery = state.get("mastery_probability", 0.0)
+    result = await validate_explanation(
+        student_explanation=body.explanation,
+        module=state.get("module", {}),
+        source_chunks=state.get("source_chunks", []),
+        prior_mastery=prior_mastery,
+        attempt_number=attempt_number,
+        agent_explanation=agent_explanation,
+    )
 
-    # Determine next action from routing
-    next_action = route_after_validation(result)
+    verdict = result["verdict"]
+    mastery = result["mastery_score"]
+    feedback = result.get("feedback_to_student", "")
+    scores = result.get("scores", {})
 
-    # Persist attempt to DB
-    attempt_id = str(uuid.uuid4())
-    try:
-        await supabase_query("kc_attempts", method="POST", json={
-            "id": attempt_id,
-            "session_id": session_id,
-            "module_id": module_id,
-            "student_explanation": body.explanation,
-            "validator_scores": {
-                **result.get("scores", {}),
-                "verdict": result.get("last_verdict", "NOT_YET"),
-                "pain_point": result.get("pain_point", ""),
-                "concepts_missed": result.get("concepts_missed", []),
-            },
-            "mastery_probability": result.get("mastery_probability", 0.3),
-            "attempt_number": attempt_number,
-        })
-    except Exception:
-        pass
+    # Determine next action
+    if verdict == "MASTERED":
+        next_action = "advance"
+        new_attempt = attempt_number  # no increment on success
+    elif verdict == "INVALID_INPUT":
+        next_action = "explain_back"
+        new_attempt = attempt_number  # no increment for invalid input
+    elif attempt_number >= MAX_ATTEMPTS:
+        next_action = "flag_review"
+        new_attempt = attempt_number + 1
+    else:
+        next_action = "reteach"
+        new_attempt = attempt_number + 1
 
-    # Update session mastery
-    should_advance = result.get("should_advance", False)
-    should_flag = result.get("should_flag", False)
-    update_payload: dict[str, Any] = {"mastery_score": result.get("mastery_probability", 0.3)}
+    should_advance = verdict == "MASTERED"
+    should_flag = next_action == "flag_review"
 
-    if should_advance or should_flag:
-        from datetime import datetime, timezone
-        update_payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+    # Update session state
+    state["mastery_probability"] = mastery
+    state["mastery_score"] = mastery
+    state["attempt_number"] = new_attempt
+    state["last_verdict"] = verdict
+    state["pain_point"] = result.get("pain_point", "")
+    if verdict not in ("MASTERED", "INVALID_INPUT"):
+        pain_points = list(state.get("pain_points", []))
+        if result.get("pain_point"):
+            pain_points.append(result["pain_point"])
+        state["pain_points"] = pain_points
 
-    if should_flag:
-        # Aggregate pain points for professor
-        pain_summary = "; ".join(result.get("pain_points", []))
-        update_payload["notes"] = pain_summary
-
-    try:
-        await supabase_query(f"sessions?id=eq.{session_id}", method="PATCH", json=update_payload)
-    except Exception:
-        pass
-
-    # Update in-memory session for next turn
+    # Persist session
     if not should_advance and not should_flag:
-        s = dict(result)
-        s["module"] = state["module"]
-        s["source_chunks"] = state["source_chunks"]
-        set_session(session_id, s)
+        set_session(session_id, state)
     else:
         _sessions.pop(session_id, None)
 
-    verdict = result.get("last_verdict") or result.get("verdict") or "NOT_YET"
-    mastery = result.get("mastery_probability", 0.3)
-    feedback = result.get("feedback_to_student", "")
-    scores = result.get("scores", {})
-    overall = sum(scores.values()) / len(scores) if scores else 0.0
+    # Persist to DB (non-blocking, skip for invalid input)
+    if verdict != "INVALID_INPUT":
+        try:
+            await supabase_query("kc_attempts", method="POST", json={
+                "id": str(uuid.uuid4()),
+                "session_id": session_id,
+                "module_id": module_id,
+                "student_explanation": body.explanation,
+                "validator_scores": {
+                    **scores,
+                    "verdict": verdict,
+                    "pain_point": result.get("pain_point", ""),
+                    "understanding_score": result.get("understanding_score", 5),
+                },
+                "mastery_probability": mastery,
+                "attempt_number": attempt_number,
+            })
+        except Exception:
+            pass
+        try:
+            update_payload: dict[str, Any] = {"mastery_score": mastery}
+            if should_advance or should_flag:
+                from datetime import datetime, timezone
+                update_payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+            if should_flag:
+                update_payload["notes"] = "; ".join(state.get("pain_points", []))
+            await supabase_query(f"sessions?id=eq.{session_id}", method="PATCH", json=update_payload)
+        except Exception:
+            pass
 
     return ExplainResponse(
         session_id=session_id,
-        attempt_number=attempt_number,
+        attempt_number=new_attempt,
         verdict=verdict,
         pain_point=result.get("pain_point", ""),
         feedback_to_student=feedback,
@@ -355,9 +372,9 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         mastery_probability=mastery,
         advance=should_advance,
         next_action=next_action,
-        prerequisite_modules=result.get("prerequisite_modules", []),
-        next_strategy=result.get("teaching_strategy"),
-        overall_score=round(overall, 3),
+        prerequisite_modules=state.get("prerequisite_modules", []),
+        next_strategy=result.get("next_strategy"),
+        overall_score=result.get("overall_score", 0.0),
         feedback=feedback,
         mastery_score=mastery,
         what_they_got_right=result.get("what_they_got_right", ""),
