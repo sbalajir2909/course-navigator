@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Trophy, Flame, Star } from "lucide-react";
-import { gamification } from "@/lib/api";
-import { events } from "@/lib/events";
+import { gamification, events } from "@/lib/api";
 
 // Demo data — used when backend is not connected
 const DEMO_LEADERBOARD = [
