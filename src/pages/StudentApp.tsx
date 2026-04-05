@@ -413,8 +413,17 @@ export default function StudentApp() {
       ));
 
       // Show feedback with verdict
-      const verdictEmoji = verdict === "MASTERED" ? "✅ Mastered!" : verdict === "PARTIAL" ? "🟡 Almost there" : "❌ Not quite yet";
-      addAIMessage(`**${verdictEmoji}**\n\n${feedback}`, []);
+      // Build rich feedback card
+      const whatRight = data.what_they_got_right || "";
+      let feedbackText = "";
+      if (verdict === "MASTERED") {
+        feedbackText = `✅ **Understood!**\n\n${whatRight || feedback}`;
+      } else if (verdict === "PARTIAL") {
+        feedbackText = `🟡 **Almost there**\n\n${whatRight ? `✓ ${whatRight}\n\n` : ""}${feedback}`;
+      } else {
+        feedbackText = `❌ **Let's try again**\n\n${whatRight ? `You got this right: ${whatRight}\n\n` : ""}${feedback}`;
+      }
+      addAIMessage(feedbackText, []);
 
       if (verdict === "MASTERED" || data.advance) {
         setTimeout(() => advanceToNextModule(), 2000);
