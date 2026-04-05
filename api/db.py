@@ -24,14 +24,15 @@ def get_supabase_client() -> httpx.AsyncClient:
     return _supabase_client
 
 
-def _get_headers() -> dict[str, str]:
+def _get_headers(method: str = "GET") -> dict[str, str]:
     """Build Supabase REST headers from environment variables."""
     key = os.getenv("SUPABASE_SERVICE_KEY", "")
+    prefer = "return=minimal" if method == "POST" else "return=representation"
     return {
         "apikey": key,
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": prefer,
     }
 
 
@@ -63,7 +64,7 @@ async def supabase_query(
     Raises:
         httpx.HTTPStatusError: On 4xx/5xx responses.
     """
-    headers = _get_headers()
+    headers = _get_headers(method)
     if extra_headers:
         headers.update(extra_headers)
 
@@ -81,9 +82,18 @@ async def supabase_query(
             )
             resp.raise_for_status()
 
-            if resp.status_code == 204 or not resp.content:
-                return []
+            if resp.status_code in (201, 204) or not resp.content:
+                return {}
             return resp.json()
+        except httpx.HTTPStatusError as e:
+            # Log server response for 400 errors (schema mismatches, etc.)
+            if 400 <= e.response.status_code < 500:
+                try:
+                    error_detail = e.response.text[:500]
+                    print(f"[DB ERROR] {method} {table} returned {e.response.status_code}: {error_detail}")
+                except Exception:
+                    pass
+            raise
         except (httpx.ReadTimeout, httpx.ConnectTimeout):
             if attempt == 2:
                 raise HTTPException(status_code=503, detail="Database timeout — please retry")

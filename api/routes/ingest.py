@@ -30,26 +30,16 @@ async def _run_ingest_pipeline(course_id, document_id, file_bytes, filename, chu
         await supabase_query(f"source_documents?id=eq.{document_id}", method="PATCH", json={"raw_text": raw_text})
         chunks = chunk_text(raw_text)
 
-        # Store chunks with embeddings (bge-m3 via Ollama)
-        from api.cf_client import embed as cf_embed
+        # Store chunks without embeddings
         chunk_id_map = {}
         for chunk in chunks:
             cid = str(uuid.uuid4())
             chunk_id_map[chunk["chunk_index"]] = cid
-            # Generate embedding (best-effort — store None if Ollama unavailable)
-            embedding: list[float] | None = None
-            try:
-                vec = await cf_embed(chunk["content"])
-                embedding = vec if vec else None
-            except Exception:
-                pass
             await supabase_query("chunks", method="POST", json={
                 "id": cid,
                 "document_id": document_id,
                 "content": chunk["content"],
                 "chunk_index": chunk["chunk_index"],
-                "metadata": {"token_count": chunk["token_count"]},
-                **({"embedding": embedding} if embedding else {}),
             })
 
         course_rows = await supabase_query("courses", params={"id": f"eq.{course_id}", "select": "title"})
@@ -62,50 +52,61 @@ async def _run_ingest_pipeline(course_id, document_id, file_bytes, filename, chu
         for idx, mod in enumerate(modules_list):
             mid = str(uuid.uuid4())
             module_title_to_id[mod["title"]] = mid
-            src_chunks = [chunk_id_map[i] for i in mod.get("source_chunk_indices", []) if i in chunk_id_map]
+
+        for idx, mod in enumerate(modules_list):
+            mid = module_title_to_id[mod["title"]]
             await supabase_query("modules", method="POST", json={
                 "id": mid, "course_id": course_id, "title": mod["title"],
                 "description": mod.get("description", ""),
-                "learning_objectives": mod.get("learning_objectives", []),
-                "source_chunk_ids": src_chunks, "order_index": idx,
-                "source_type": "material",
-                "estimated_minutes": mod.get("estimated_minutes", 30),
+                "order_index": idx,
                 "concepts": mod.get("concepts", []),
+                "estimated_minutes": mod.get("estimated_minutes", 30),
             })
-
-        for mod in modules_list:
-            mid = module_title_to_id.get(mod["title"])
-            if not mid: continue
-            for pre in mod.get("prerequisites", []):
-                pid = module_title_to_id.get(pre)
-                if pid:
-                    await supabase_query("prerequisites", method="POST", json={
-                        "id": str(uuid.uuid4()), "module_id": mid, "prerequisite_module_id": pid
-                    })
+            # Insert prerequisites into the prerequisites table
+            for prereq_title in mod.get("prerequisites", []):
+                if prereq_title in module_title_to_id:
+                    prereq_id = module_title_to_id[prereq_title]
+                    try:
+                        await supabase_query("prerequisites", method="POST", json={
+                            "module_id": mid,
+                            "prerequisite_module_id": prereq_id,
+                        })
+                    except Exception:
+                        pass  # Ignore constraint violations
 
         chunk_content_map = {c["chunk_index"]: c["content"] for c in chunks}
         for mod in modules_list:
             mid = module_title_to_id.get(mod["title"])
-            if not mid: continue
-            src_texts = [chunk_content_map[i] for i in mod.get("source_chunk_indices", []) if i in chunk_content_map]
+            if not mid:
+                continue
+            # Map source chunk indices to actual chunk IDs for source_chunk_ids field
+            source_chunk_indices = mod.get("source_chunk_indices", [])
+            source_chunk_ids = [chunk_id_map.get(i) for i in source_chunk_indices if i in chunk_id_map]
+            if source_chunk_ids:
+                await supabase_query(f"modules?id=eq.{mid}", method="PATCH", json={"source_chunk_ids": source_chunk_ids})
+            
+            src_texts = [chunk_content_map[i] for i in source_chunk_indices if i in chunk_content_map]
             try:
                 fr = await check_faithfulness(mod, src_texts)
-                await supabase_query(f"modules?id=eq.{mid}", method="PATCH", json={
-                    "faithfulness_verdict": fr["verdict"],
-                    "faithfulness_details": {"details": fr["details"], "unsupported_claims": fr["unsupported_claims"]}
-                })
-            except: pass
+            except:
+                pass
             try:
                 assmts = await generate_assessments(mod, src_texts)
                 for a in assmts:
-                    sc = [chunk_id_map[i] for i in a.get("source_chunk_indices", []) if i in chunk_id_map]
+                    correct_answer = a.get("correct_answer") or a.get("answer", "")
+                    difficulty_tier = a.get("difficulty_tier", "application")
                     await supabase_query("assessments", method="POST", json={
-                        "id": str(uuid.uuid4()), "module_id": mid,
-                        "question": a["question"], "question_type": a["question_type"],
-                        "options": a.get("options"), "correct_answer": a["correct_answer"],
-                        "difficulty_tier": a["difficulty_tier"], "source_chunk_ids": sc
+                        "id": str(uuid.uuid4()),
+                        "module_id": mid,
+                        "question": a["question"],
+                        "question_type": a["question_type"],
+                        "options": a.get("options"),
+                        "correct_answer": correct_answer,
+                        "difficulty_tier": difficulty_tier,
+                        "source_chunk_ids": source_chunk_ids if source_chunk_ids else [],
                     })
-            except: pass
+            except:
+                pass
 
         await supabase_query(f"courses?id=eq.{course_id}", method="PATCH", json={"status": "ready"})
 
@@ -134,7 +135,10 @@ async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File
         await supabase_query(f"courses?id=eq.{course_id}", method="PATCH", json={"status": "failed"})
         raise HTTPException(status_code=400, detail=str(exc))
     document_id = str(uuid.uuid4())
-    await supabase_query("source_documents", method="POST", json={"id": document_id, "course_id": course_id, "filename": filename, "raw_text": None})
+    await supabase_query("source_documents", method="POST", json={
+        "id": document_id, "course_id": course_id, "filename": filename,
+        "raw_text": None,
+    })
     initial_chunks = chunk_text(raw_text_preview)
     background_tasks.add_task(_run_ingest_pipeline, course_id, document_id, file_bytes, filename, initial_chunks)
     return IngestResponse(course_id=course_id, status="processing")

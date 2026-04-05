@@ -137,7 +137,7 @@ class AttemptOut(BaseModel):
 async def _get_module_with_chunks(module_id: str) -> tuple[dict, list[str]]:
     modules = await supabase_query(
         "modules",
-        params={"id": f"eq.{module_id}", "select": "id,title,description,learning_objectives,source_chunk_ids,course_id,concepts"},
+        params={"id": f"eq.{module_id}", "select": "id,title,description,learning_objectives,source_chunk_ids,course_id,concepts,estimated_minutes"},
     )
     if not modules:
         raise HTTPException(status_code=404, detail=f"Module {module_id} not found.")
@@ -185,6 +185,10 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
 
     # Get module + source chunks
     module, source_chunks = await _get_module_with_chunks(module_id)
+
+    # Ensure concepts field exists as a list
+    if "concepts" not in module or not module["concepts"]:
+        module["concepts"] = []
 
     # Check for existing session for this student + module (active or completed).
     # Going back to a completed module should still show progress, not start fresh.
