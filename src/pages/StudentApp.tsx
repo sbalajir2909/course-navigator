@@ -90,6 +90,10 @@ export default function StudentApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conceptIndex, setConceptIndex] = useState(0);
+  const [totalConcepts, setTotalConcepts] = useState(1);
+  const [currentConceptTitle, setCurrentConceptTitle] = useState("");
+  const [prerequisiteRecs, setPrerequisiteRecs] = useState<any[]>([]);
   const [backendDown, setBackendDown] = useState(false);
   const [diagnosticQuestions, setDiagnosticQuestions] = useState<Assessment[]>([]);
   const [diagnosticIndex, setDiagnosticIndex] = useState(0);
@@ -224,6 +228,10 @@ export default function StudentApp() {
     setError(null);
     setDiagnosticIndex(0);
     setDiagnosticQuestions([]);
+    setConceptIndex(0);
+    setTotalConcepts(1);
+    setCurrentConceptTitle("");
+    setPrerequisiteRecs([]);
 
     const courseId = localStorage.getItem("assign_course_id") || "";
     const studentId = localStorage.getItem("assign_student_id") || "";
@@ -242,6 +250,8 @@ export default function StudentApp() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setSessionId(data.session_id);
+      if (data.total_concepts) setTotalConcepts(data.total_concepts);
+      if (data.current_concept_title) setCurrentConceptTitle(data.current_concept_title);
 
       // Fetch diagnostic questions
       const aRes = await fetch(`${ASSIGN_URL}/api/courses/${courseId}/modules/${mod.id}/assessments`);
@@ -610,7 +620,12 @@ export default function StudentApp() {
             {selectedModule && (
               <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${PHASE_COLORS[phase]}`}>
                 {PHASE_LABELS[phase]}
-                {phase === "teaching" && ` — ${attemptNumber}/5`}
+                {phase === "teaching" && ` — Attempt ${attemptNumber}/5`}
+              </span>
+            )}
+            {selectedModule && totalConcepts > 1 && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-medium">
+                Concept {conceptIndex + 1}/{totalConcepts}
               </span>
             )}
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -644,6 +659,28 @@ export default function StudentApp() {
                   <Upload className="w-4 h-4 mr-2" /> Upload Materials
                 </Button>
               </div>
+            </div>
+          )}
+
+          {/* Prerequisite recommendations */}
+          {prerequisiteRecs.length > 0 && (
+            <div className="mx-2 mb-3 bg-orange-50 border border-orange-200 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-orange-600 font-semibold text-sm">⚠ Before continuing, you may want to review:</span>
+              </div>
+              {prerequisiteRecs.map((rec: any, i: number) => (
+                <div key={i} className="mb-2 pl-2 border-l-2 border-orange-300">
+                  <div className="text-sm font-medium text-orange-800">{rec.topic}</div>
+                  <div className="text-xs text-orange-600 mt-0.5">{rec.reason}</div>
+                  {rec.brief_explanation && <div className="text-xs text-orange-500 mt-1">{rec.brief_explanation}</div>}
+                </div>
+              ))}
+              <button
+                onClick={() => setPrerequisiteRecs([])}
+                className="text-xs text-orange-500 hover:text-orange-700 mt-1 underline"
+              >
+                Dismiss and continue anyway →
+              </button>
             </div>
           )}
 
