@@ -159,15 +159,18 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
 
     # Check for existing active session for this student + module
     # If one exists and isn't expired, resume it instead of creating a new one
-    existing_sessions = await supabase_query(
-        "sessions",
-        params={
-            "student_id": f"eq.{student_id}",
-            "module_id": f"eq.{module_id}",
-            "completed_at": "is.null",
-            "select": "id,mastery_score",
-        }
-    )
+    try:
+        existing_sessions = await supabase_query(
+            "sessions",
+            params={
+                "student_id": f"eq.{student_id}",
+                "module_id": f"eq.{module_id}",
+                "completed_at": "is.null",
+                "select": "id,mastery_score",
+            }
+        )
+    except Exception:
+        existing_sessions = []
 
     # Get student memory for personalization
     memory = await get_student_memory(student_id, module_id)

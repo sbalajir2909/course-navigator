@@ -9,6 +9,9 @@ import os
 from typing import Any, Optional
 
 import httpx
+from fastapi import HTTPException
+
+_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
 def _get_headers() -> dict[str, str]:
@@ -56,19 +59,22 @@ async def supabase_query(
 
     url = f"{_get_url()}/{table}"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
-            method,
-            url,
-            headers=headers,
-            params=params,
-            json=json,
-        )
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json,
+            )
+            resp.raise_for_status()
 
-        if resp.status_code == 204 or not resp.content:
-            return []
-        return resp.json()
+            if resp.status_code == 204 or not resp.content:
+                return []
+            return resp.json()
+    except (httpx.ReadTimeout, httpx.ConnectTimeout):
+        raise HTTPException(status_code=503, detail="Database timeout — please retry")
 
 
 async def supabase_rpc(
@@ -94,9 +100,12 @@ async def supabase_rpc(
     base = os.getenv("SUPABASE_URL", "").rstrip("/")
     url = f"{base}/rest/v1/rpc/{function_name}"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, headers=headers, json=params or {})
-        resp.raise_for_status()
-        if resp.status_code == 204 or not resp.content:
-            return None
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(url, headers=headers, json=params or {})
+            resp.raise_for_status()
+            if resp.status_code == 204 or not resp.content:
+                return None
+            return resp.json()
+    except (httpx.ReadTimeout, httpx.ConnectTimeout):
+        raise HTTPException(status_code=503, detail="Database timeout — please retry")
