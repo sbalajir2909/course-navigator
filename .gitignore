@@ -1,4 +1,4 @@
-# Python
+# ── Python ────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -9,28 +9,45 @@ dist/
 build/
 .eggs/
 
-# Environment
+# ── Node / Frontend ───────────────────────────────────────
+node_modules
+dist-ssr
+*.local
+logs
+!logs/.gitkeep
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ── Environment ───────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# Virtual environments
+# ── Virtual environments ──────────────────────────────────
 venv/
 .venv/
 env/
 
-# IDE
-.idea/
-.vscode/
+# ── IDE ───────────────────────────────────────────────────
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 *.swp
 *.swo
 
-# OS
+# ── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Duplicate nested directory
+# ── Project-specific ─────────────────────────────────────
 assign-b2b/
-
-# DB migrations / local state
 db/
