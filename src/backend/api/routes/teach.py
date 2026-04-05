@@ -37,7 +37,10 @@ def get_session(session_id: str) -> dict | None:
     entry = _sessions.get(session_id)
     if not entry:
         return None
-    if time.time() - entry["created_at"] > 7200:  # 2 hour expiry
+    # Handle old format (dict without 'state' wrapper) gracefully
+    if "state" not in entry:
+        return entry  # legacy format — return directly
+    if time.time() - entry.get("created_at", time.time()) > 7200:
         del _sessions[session_id]
         return None
     return entry["state"]
@@ -78,6 +81,7 @@ class ExplainResponse(BaseModel):
     next_action: str                # "advance" | "reteach" | "recommend_prereqs" | "flag_review"
     prerequisite_modules: list[dict]
     next_strategy: str | None
+    what_they_got_right: str = ""
     # Legacy compat
     overall_score: float = 0.0
     feedback: str = ""
@@ -229,7 +233,7 @@ async def stream_explanation(
                 attempt_number=state.get("attempt_number", 1),
             )
             state["current_explanation"] = explanation
-            _sessions[session_id] = state
+            set_session(session_id, state)
         except Exception as e:
             explanation = f"Error generating explanation: {str(e)}"
 
@@ -249,6 +253,8 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
 
     # Update state with student response
     state["student_response"] = body.explanation
+    # Pass agent explanation for reference-anchored validation
+    state["agent_explanation"] = state.get("current_explanation", "")
 
     # Run validate → route via graph
     thread_id = get_thread_id(student_id, module_id)
@@ -299,11 +305,12 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
 
     # Update in-memory session for next turn
     if not should_advance and not should_flag:
-        _sessions[session_id] = dict(result)
-        _sessions[session_id]["module"] = state["module"]
-        _sessions[session_id]["source_chunks"] = state["source_chunks"]
+        s = dict(result)
+        s["module"] = state["module"]
+        s["source_chunks"] = state["source_chunks"]
+        set_session(session_id, s)
     else:
-        _sessions.pop(session_id, None)  # remove from expiry store too
+        _sessions.pop(session_id, None)
 
     verdict = result.get("last_verdict", "NOT_YET")
     mastery = result.get("mastery_probability", 0.3)
@@ -327,6 +334,7 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         overall_score=round(overall, 3),
         feedback=feedback,
         mastery_score=mastery,
+        what_they_got_right=result.get("what_they_got_right", ""),
     )
 
 
