@@ -1,7 +1,9 @@
 """
 agents/teaching_agent.py
-Strategy-aware Socratic teaching agent using GPT-4o-mini.
-Strict forbidden-phrase check ensures clean, confident explanations.
+Concept-aware Socratic teaching agent.
+
+A module has multiple concepts. The agent teaches ONE concept at a time.
+The concept's learning_objective drives the teaching and validation focus.
 """
 from __future__ import annotations
 import os
@@ -9,30 +11,24 @@ from openai import AsyncOpenAI
 
 TEACHING_SYSTEM_PROMPT = """You are a clear, confident Socratic tutor.
 
-YOUR ONLY JOB: Explain the concept below simply and clearly, then ask the student to explain it back.
+YOUR ONLY JOB: Explain ONE specific concept simply and clearly, then ask the student to explain it back.
 
-STRICT RULES — violating any of these makes you useless:
-1. Teach ONLY what is in the SOURCE MATERIAL. Do not add external knowledge.
-2. NEVER mention what the source material does NOT cover. Never say "the source doesn't address..." or "the material doesn't explain..." — this confuses students and teaches them nothing.
-3. Keep your explanation to 4-6 sentences maximum. No walls of text.
-4. Use simple, direct language. No hedging. No qualifiers. Teach confidently.
-5. End EVERY explanation with ONE clear question: "Now explain [specific concept] back to me in your own words."
-6. On attempt 2: use a concrete real-world analogy. Map it explicitly back to the concept.
-7. On attempt 3: give one specific worked example. Show the concept in action.
-8. On attempt 4: break it into 3 numbered steps. Simple. Sequential. Clear.
+STRICT RULES:
+1. Teach ONLY the specific concept listed below. Do not cover other concepts in this module.
+2. Use ONLY information from the SOURCE MATERIAL. Do not add outside knowledge.
+3. NEVER mention what the source material does NOT cover. Only teach what IS there.
+4. Keep your explanation to 4-6 sentences maximum.
+5. Use simple, direct language. Teach confidently. No hedging.
+6. End with ONE clear question: "Now explain [specific concept] back to me in your own words."
+7. On attempt 2: use a concrete real-world analogy that maps back to the concept.
+8. On attempt 3: give one specific worked example step-by-step.
+9. On attempt 4: break into 3 numbered points. One sentence each.
 
-NEVER DO THESE:
-- Never say "According to the source material..."
-- Never say "The material doesn't address..."
-- Never say "The source doesn't explicitly..."
-- Never say "the source material does not"
-- Never say "doesn't provide further details"
-- Never say "not explicitly mentioned"
-- Never say "not provided in the source"
-- Never ask multiple questions
-- Never write more than 6 sentences
-- Never use the phrase "it is worth noting"
-- Never hedge with "however" or "but" when describing the core concept"""
+NEVER:
+- Say "According to the source material..." or "The source doesn't address..."
+- Write more than 6 sentences
+- Ask multiple questions
+- Hedge or qualify the core concept"""
 
 FORBIDDEN_PHRASES = [
     "source material does not",
@@ -45,15 +41,18 @@ FORBIDDEN_PHRASES = [
     "the source doesn't",
     "according to the source",
     "the source material",
-    "material does not",
-    "doesn't address that",
 ]
 
 STRATEGY_INSTRUCTIONS = {
+    "direct":    "Explain the concept directly and clearly from the source material.",
+    "analogy":   "Use one concrete real-world analogy. Map each part explicitly back to the concept.",
+    "example":   "Give one specific worked example. Show the concept applied step-by-step.",
+    "decompose": "Break into exactly 3 numbered steps. One clear sentence each.",
+    # Legacy names
     1: "Explain directly and clearly from the source material.",
-    2: "Use a concrete real-world analogy. Map each part of the analogy explicitly back to the concept.",
-    3: "Give one specific worked example. Show the concept applied step-by-step to a real scenario.",
-    4: "Break it into exactly 3 numbered steps. One sentence each. Simple and sequential.",
+    2: "Use one concrete real-world analogy. Map each part explicitly back to the concept.",
+    3: "Give one specific worked example. Show the concept applied step-by-step.",
+    4: "Break into exactly 3 numbered steps. One clear sentence each.",
 }
 
 
@@ -65,43 +64,66 @@ async def teach_concept(
     pain_point: str = "",
     attempt_number: int = 1,
     memory_context: str = "",
+    # New: current concept index within the module
+    concept_index: int = 0,
 ) -> str:
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    """
+    Teach ONE concept from the module's concepts list.
+    If concept_index is valid, focus on that specific concept.
+    Falls back to full module teaching if no concepts defined.
+    """
+    # Primary: Groq. Fallback: GPT-4o-mini.
+    from groq import Groq as _Groq
+    gclient = _Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-    # Map strategy string to attempt number for instruction lookup
-    strategy_to_attempt = {"direct": 1, "analogy": 2, "example": 3, "decompose": 4}
-    effective_attempt = strategy_to_attempt.get(strategy, attempt_number)
-    strategy_instruction = STRATEGY_INSTRUCTIONS.get(effective_attempt, STRATEGY_INSTRUCTIONS[4])
+    # Get the specific concept to teach
+    concepts = module.get("concepts", [])
+    if concepts and concept_index < len(concepts):
+        current_concept = concepts[concept_index]
+        concept_title = current_concept.get("title", module.get("title", ""))
+        learning_objective = current_concept.get("learning_objective", "")
+        key_points = current_concept.get("key_points", [])
+    else:
+        # No concepts defined — teach the whole module (legacy)
+        concept_title = module.get("title", "")
+        learning_objective = ", ".join(module.get("learning_objectives", [])[:2])
+        key_points = []
 
-    # Build source context — MAX 150 words per chunk, 3 chunks max
-    truncated_chunks = []
-    for chunk in source_chunks[:3]:
-        words = chunk.split()
-        truncated_chunks.append(" ".join(words[:150]))
-    source_context = "\n---\n".join(truncated_chunks) if truncated_chunks else module.get("description", "")
+    # Build source context — max 150 words per chunk, 3 chunks
+    source_text = "\n---\n".join(
+        " ".join(c.split()[:150]) for c in source_chunks[:3]
+    ) if source_chunks else module.get("description", "")
 
-    objectives = ", ".join(module.get("learning_objectives", [])[:3])
+    # Get strategy instruction
+    strategy_key = strategy if strategy in STRATEGY_INSTRUCTIONS else attempt_number
+    strategy_instruction = STRATEGY_INSTRUCTIONS.get(strategy_key, STRATEGY_INSTRUCTIONS["direct"])
 
-    # Pain point context for reteaching
+    # Pain point context
     pain_context = ""
     if pain_point and attempt_number > 1:
-        pain_context = f"\nThe student's previous attempt struggled with: {pain_point}\nAddress this directly using the strategy above.\n"
+        pain_context = f"\nThe student struggled with: {pain_point}\nAddress this directly.\n"
 
-    user_message = f"""SOURCE MATERIAL:
-{source_context}
+    # Key points hint (if available)
+    key_hints = ""
+    if key_points:
+        key_hints = f"\nKey points to cover: {', '.join(key_points[:3])}\n"
 
-LEARNING OBJECTIVE: {objectives}
+    user_message = f"""CONCEPT TO TEACH: {concept_title}
+LEARNING OBJECTIVE: {learning_objective}
+{key_hints}
+SOURCE MATERIAL:
+{source_text}
 {pain_context}
-STRATEGY FOR THIS ATTEMPT (#{attempt_number}): {strategy_instruction}
+STRATEGY FOR ATTEMPT #{attempt_number}: {strategy_instruction}
 
-Explain the concept now. Maximum 6 sentences. End with your question."""
+Explain ONLY this specific concept. Maximum 6 sentences. End with your question."""
 
-    # Build message history — last 2 turns only
+    # Build minimal history (last 2 turns only)
     history = []
     for h in student_history[-2:]:
         exp = h.get("student_explanation", "")
         if exp and len(exp.split()) >= 5:
-            history.append({"role": "user", "content": f"Student said: {exp[:200]}"})
+            history.append({"role": "user", "content": f"Student said: {exp[:150]}"})
 
     messages = [
         {"role": "system", "content": TEACHING_SYSTEM_PROMPT},
@@ -110,24 +132,21 @@ Explain the concept now. Maximum 6 sentences. End with your question."""
     ]
 
     # Token guard
-    total_chars = sum(len(m["content"]) for m in messages)
-    if total_chars > 8000:
+    if sum(len(m["content"]) for m in messages) > 6000:
         messages = [messages[0], messages[-1]]
 
-    # Primary: Groq (free). Fallback: GPT-4o-mini.
     try:
-        from groq import Groq as _Groq
-        _gclient = _Groq(api_key=os.getenv("GROQ_API_KEY"))
-        _gr = _gclient.chat.completions.create(
+        resp = gclient.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
             max_tokens=250,
             temperature=0.4,
         )
-        explanation = _gr.choices[0].message.content.strip()
-    except Exception:
-        # Fallback to GPT-4o-mini
+        explanation = resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[TEACH] Groq failed: {e} — trying GPT-4o-mini")
         try:
+            client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -136,20 +155,19 @@ Explain the concept now. Maximum 6 sentences. End with your question."""
             )
             explanation = response.choices[0].message.content.strip()
         except Exception:
-            explanation = f"Let me explain {module.get('title', 'this concept')} differently. {module.get('description', '')} What part would you like me to clarify?"
+            explanation = f"Let me explain {concept_title}. {module.get('description', '')} What do you already know about this?"
 
     # Forbidden phrase check — regenerate once if triggered
-    has_forbidden = any(phrase.lower() in explanation.lower() for phrase in FORBIDDEN_PHRASES)
-    if has_forbidden:
-        messages[-1]["content"] += "\n\nCRITICAL: Do NOT mention what the source doesn't cover. Only teach what IS there. No hedging. Be confident."
+    if any(p.lower() in explanation.lower() for p in FORBIDDEN_PHRASES):
+        messages[-1]["content"] += "\n\nCRITICAL: Only teach what IS in the source. Never mention gaps or what the source doesn't cover."
         try:
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
+            resp2 = gclient.chat.completions.create(
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 max_tokens=250,
                 temperature=0.2,
             )
-            explanation = response.choices[0].message.content.strip()
+            explanation = resp2.choices[0].message.content.strip()
         except Exception:
             pass
 
