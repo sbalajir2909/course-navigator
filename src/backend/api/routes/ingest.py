@@ -60,7 +60,8 @@ async def _run_ingest_pipeline(course_id, document_id, file_bytes, filename, chu
                 "learning_objectives": mod.get("learning_objectives", []),
                 "source_chunk_ids": src_chunks, "order_index": idx,
                 "source_type": "material",
-                "estimated_minutes": mod.get("estimated_minutes", 30)
+                "estimated_minutes": mod.get("estimated_minutes", 30),
+                "concepts": mod.get("concepts", []),
             })
 
         for mod in modules_list:
