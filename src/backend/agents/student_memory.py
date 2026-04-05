@@ -52,7 +52,7 @@ async def get_student_memory(student_id: str, module_id: str) -> dict:
         if s.get("mastery_score", 1.0) < 0.4
     ]
     
-    prior_mastery = 0.3  # default BKT init
+    prior_mastery = 0.0  # start at 0, not 0.3
     best_strategy = "initial"
     attempt_count = len(sessions)
     
