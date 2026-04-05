@@ -1,18 +1,14 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { useAuth } from "@/context/AuthContext";
-import { ApiError } from "@/lib/api";
+
+const API_BASE = "http://localhost:8000";
 
 const Register = () => {
-  const { register } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({
-    first_name: "",
-    last_name: "",
+    name: "",
     email: "",
     password: "",
-    role: "student" as "student" | "instructor",
-    education_level: "undergraduate",
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -25,19 +21,30 @@ const Register = () => {
     setError("");
     setLoading(true);
     try {
-      await register(form);
-      navigate(form.role === "instructor" ? "/instructor" : "/student");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Registration failed. Try again.");
+      const res = await fetch(`${API_BASE}/api/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: form.email,
+          name: form.name,
+          password: form.password,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Registration failed. Try again.");
+      }
+      // Persist auth data
+      localStorage.setItem("assign_token", data.token);
+      localStorage.setItem("assign_student_id", data.student_id);
+      localStorage.setItem("assign_name", data.name);
+      localStorage.setItem("assign_email", data.email);
+      navigate("/student");
+    } catch (err: any) {
+      setError(err.message || "Registration failed. Try again.");
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleDemo = (role: "student" | "instructor") => {
-    localStorage.setItem("assign_token", "demo-token");
-    localStorage.setItem("assign_user", JSON.stringify({ userId: "demo", role, firstName: "Demo" }));
-    navigate(role === "instructor" ? "/instructor" : "/student");
   };
 
   return (
@@ -49,46 +56,16 @@ const Register = () => {
         </div>
 
         <div className="bg-card border border-border rounded-xl p-6 shadow-sm">
-          {/* Role toggle */}
-          <div className="flex rounded-lg border border-border overflow-hidden mb-5">
-            {(["student", "instructor"] as const).map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => update("role", r)}
-                className={`flex-1 py-2 text-sm font-medium transition-colors capitalize ${
-                  form.role === r
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-card text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-
           <form onSubmit={handleSubmit} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-foreground mb-1">First name</label>
-                <input
-                  value={form.first_name}
-                  onChange={(e) => update("first_name", e.target.value)}
-                  required
-                  placeholder="Alex"
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-foreground mb-1">Last name</label>
-                <input
-                  value={form.last_name}
-                  onChange={(e) => update("last_name", e.target.value)}
-                  required
-                  placeholder="Smith"
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </div>
+            <div>
+              <label className="block text-xs font-medium text-foreground mb-1">Full name</label>
+              <input
+                value={form.name}
+                onChange={(e) => update("name", e.target.value)}
+                required
+                placeholder="Alex Smith"
+                className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+              />
             </div>
 
             <div>
@@ -116,21 +93,6 @@ const Register = () => {
               />
             </div>
 
-            {form.role === "student" && (
-              <div>
-                <label className="block text-xs font-medium text-foreground mb-1">Level</label>
-                <select
-                  value={form.education_level}
-                  onChange={(e) => update("education_level", e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-                >
-                  <option value="high_school">High School</option>
-                  <option value="undergraduate">Undergraduate</option>
-                  <option value="graduate">Graduate</option>
-                </select>
-              </div>
-            )}
-
             {error && (
               <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</p>
             )}
@@ -150,25 +112,11 @@ const Register = () => {
               Sign in
             </Link>
           </p>
-
-          <div className="mt-5 pt-5 border-t border-border">
-            <p className="text-center text-xs text-muted-foreground mb-3">Or jump straight in →</p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => handleDemo("student")}
-                className="py-2 rounded-lg border border-border text-xs font-medium text-foreground hover:bg-muted transition-colors"
-              >
-                Demo as Student
-              </button>
-              <button
-                onClick={() => handleDemo("instructor")}
-                className="py-2 rounded-lg border border-border text-xs font-medium text-foreground hover:bg-muted transition-colors"
-              >
-                Demo as Instructor
-              </button>
-            </div>
-          </div>
         </div>
+
+        <p className="text-center text-xs text-muted-foreground mt-6">
+          <Link to="/" className="hover:underline">← Back to home</Link>
+        </p>
       </div>
     </div>
   );
