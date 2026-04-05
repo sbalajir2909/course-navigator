@@ -21,6 +21,8 @@ interface Message {
   isMCQ?: boolean;
   mcqOptions?: string[];
   mcqCorrect?: string;
+  whatTheyGotRight?: string;
+  feedbackCard?: "mastered" | "partial" | "not_yet" | "invalid";
 }
 
 interface Module {
@@ -413,17 +415,23 @@ export default function StudentApp() {
       ));
 
       // Show feedback with verdict
-      // Build rich feedback card
-      const whatRight = data.what_they_got_right || "";
-      let feedbackText = "";
-      if (verdict === "MASTERED") {
-        feedbackText = `✅ **Understood!**\n\n${whatRight || feedback}`;
-      } else if (verdict === "PARTIAL") {
-        feedbackText = `🟡 **Almost there**\n\n${whatRight ? `✓ ${whatRight}\n\n` : ""}${feedback}`;
-      } else {
-        feedbackText = `❌ **Let's try again**\n\n${whatRight ? `You got this right: ${whatRight}\n\n` : ""}${feedback}`;
+      // Handle INVALID_INPUT — no attempt counted, stay in explain_back
+      if (verdict === "INVALID_INPUT") {
+        addAIMessage(`💬 ${feedback}`, []);
+        setPhase("explain_back");
+        setIsLoading(false);
+        return;
       }
-      addAIMessage(feedbackText, []);
+
+      const whatRight = data.what_they_got_right || "";
+      const feedbackCardType = verdict === "MASTERED" ? "mastered" : verdict === "PARTIAL" ? "partial" : "not_yet";
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: feedback,
+        feedbackCard: feedbackCardType,
+        whatTheyGotRight: whatRight,
+        verdict,
+      }]);
 
       if (verdict === "MASTERED" || data.advance) {
         setTimeout(() => advanceToNextModule(), 2000);
@@ -657,9 +665,30 @@ export default function StudentApp() {
                   ? "bg-card border border-border text-foreground"
                   : "bg-primary text-white"
               }`}>
-                {msg.text.split("**").map((part, pi) =>
-                  pi % 2 === 1 ? <strong key={pi}>{part}</strong> : <span key={pi}>{part}</span>
-                )}
+                {/* Feedback card rendering */}
+              {msg.feedbackCard === "mastered" && (
+                <div style={{background: "#DCFCE7", border: "1px solid #16A34A", borderRadius: 8, padding: 12, marginBottom: 4}}>
+                  <div style={{color: "#15803D", fontWeight: 600, marginBottom: 4}}>✓ Understood!</div>
+                  <div style={{color: "#166534", fontSize: 14}}>{msg.whatTheyGotRight || msg.text}</div>
+                </div>
+              )}
+              {msg.feedbackCard === "partial" && (
+                <div style={{background: "#FEF9C3", border: "1px solid #D97706", borderRadius: 8, padding: 12, marginBottom: 4}}>
+                  <div style={{color: "#92400E", fontWeight: 600, marginBottom: 4}}>Almost there</div>
+                  {msg.whatTheyGotRight && <div style={{color: "#78350F", fontSize: 14, marginBottom: 6}}>✓ {msg.whatTheyGotRight}</div>}
+                  <div style={{color: "#92400E", fontSize: 14}}>{msg.text}</div>
+                </div>
+              )}
+              {msg.feedbackCard === "not_yet" && (
+                <div style={{background: "#FEF2F2", border: "1px solid #DC2626", borderRadius: 8, padding: 12, marginBottom: 4}}>
+                  <div style={{color: "#991B1B", fontWeight: 600, marginBottom: 4}}>Let's try again</div>
+                  {msg.whatTheyGotRight && <div style={{color: "#7F1D1D", fontSize: 13, marginBottom: 6}}>You got this right: {msg.whatTheyGotRight}</div>}
+                  <div style={{color: "#B91C1C", fontSize: 14}}>{msg.text}</div>
+                </div>
+              )}
+              {!msg.feedbackCard && msg.text.split("**").map((part, pi) =>
+                pi % 2 === 1 ? <strong key={pi}>{part}</strong> : <span key={pi}>{part}</span>
+              )}
                 {msg.streaming && <span className="inline-block w-1.5 h-4 bg-primary/60 ml-1 animate-pulse rounded" />}
               </div>
 
