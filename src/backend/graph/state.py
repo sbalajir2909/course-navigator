@@ -1,39 +1,46 @@
 """
 graph/state.py
-TypedDict definition for the LangGraph teaching loop state.
+TeachingState — full state for the LangGraph teaching loop.
 """
 from __future__ import annotations
-
-from typing import Any, Optional
-from typing_extensions import TypedDict
+from typing import Any, TypedDict
 
 
-class TeachingState(TypedDict):
-    """
-    Shared state threaded through the LangGraph teaching loop.
-
-    Fields:
-        module_id:            UUID string of the module being taught.
-        student_id:           UUID string of the student.
-        source_chunks:        List of raw text strings from the module's source material.
-        student_history:      List of prior kc_attempt dicts for this student/module.
-        current_explanation:  The teaching agent's most recent explanation string.
-        student_response:     The student's latest explain-back text.
-        validator_result:     The validator agent's latest result dict.
-        mastery_probability:  Current BKT mastery probability (0.0–1.0).
-        attempt_count:        Number of explain-back attempts so far.
-        strategy:             Current teaching strategy key.
-        should_advance:       Whether the student has met the mastery threshold.
-    """
-
-    module_id: str
+class TeachingState(TypedDict, total=False):
+    # Session identity
+    session_id: str
     student_id: str
-    source_chunks: list[str]
-    student_history: list[dict[str, Any]]
-    current_explanation: Optional[str]
-    student_response: Optional[str]
-    validator_result: Optional[dict[str, Any]]
-    mastery_probability: float
-    attempt_count: int
-    strategy: str
+    module_id: str
+
+    # Module + source material
+    module: dict[str, Any]          # full module dict with title, objectives, etc.
+    source_chunks: list[str]        # raw text chunks from source material
+
+    # Teaching state
+    attempt_number: int             # starts at 1, increments after each PARTIAL/NOT_YET
+    teaching_strategy: str          # "direct" | "analogy" | "example" | "decompose"
+    current_explanation: str        # what the AI just taught
+
+    # Student response
+    student_response: str           # latest explain-back text
+
+    # Validator output
+    last_verdict: str               # "MASTERED" | "PARTIAL" | "NOT_YET"
+    pain_point: str                 # from latest validation
+    pain_points: list[str]          # accumulated across all attempts
+    concepts_missed: list[str]      # from latest validator output
+    feedback_to_student: str        # targeted feedback message
+
+    # Mastery tracking
+    mastery_probability: float      # BKT probability
+    scores: dict[str, float]        # dimension scores from validator
+
+    # History
+    student_history: list[dict[str, Any]]  # all prior attempts
+
+    # Prerequisite recommendations
+    prerequisite_modules: list[dict[str, Any]]
+
+    # Routing
     should_advance: bool
+    should_flag: bool
