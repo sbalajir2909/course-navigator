@@ -23,12 +23,10 @@ class ModuleOut(BaseModel):
     id: str
     title: str
     description: str | None
-    learning_objectives: list[str]
     order_index: int
     estimated_minutes: int
-    source_type: str
-    faithfulness_verdict: str | None
-    prerequisites: list[str]  # List of prerequisite module UUIDs
+    concepts: list | None
+    prerequisites: list[str]  # JSONB array of prerequisite module UUIDs
 
 
 class CourseOut(BaseModel):
@@ -76,8 +74,8 @@ class AssessmentOut(BaseModel):
     question: str
     question_type: str
     options: list[str] | None
-    correct_answer: str
-    difficulty_tier: str
+    answer: str
+    reference_explanation: str | None
 
 
 # ─────────────────────────────────────────────────────────
@@ -106,28 +104,10 @@ async def get_course(course_id: str) -> CourseOut:
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,description,learning_objectives,order_index,estimated_minutes,source_type,faithfulness_verdict",
+            "select": "id,title,description,order_index,estimated_minutes,concepts,prerequisites",
             "order": "order_index.asc",
         },
     )
-
-    # Fetch all prerequisites for this course's modules
-    if modules_raw:
-        module_ids = [m["id"] for m in modules_raw]
-        id_list = "(" + ",".join(module_ids) + ")"
-        prereqs_raw = await supabase_query(
-            "prerequisites",
-            params={
-                "module_id": f"in.{id_list}",
-                "select": "module_id,prerequisite_module_id",
-            },
-        )
-        # Build map: module_id → list of prereq module UUIDs
-        prereq_map: dict[str, list[str]] = {}
-        for p in prereqs_raw:
-            prereq_map.setdefault(p["module_id"], []).append(p["prerequisite_module_id"])
-    else:
-        prereq_map = {}
 
     modules_out = []
     for m in modules_raw:
@@ -136,12 +116,10 @@ async def get_course(course_id: str) -> CourseOut:
                 id=m["id"],
                 title=m["title"],
                 description=m.get("description"),
-                learning_objectives=m.get("learning_objectives") or [],
                 order_index=m.get("order_index", 0),
                 estimated_minutes=m.get("estimated_minutes", 30),
-                source_type=m.get("source_type", "material"),
-                faithfulness_verdict=m.get("faithfulness_verdict"),
-                prerequisites=prereq_map.get(m["id"], []),
+                concepts=m.get("concepts"),
+                prerequisites=m.get("prerequisites") or [],
             )
         )
 
@@ -176,24 +154,13 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
         "modules",
         params={
             "course_id": f"eq.{course_id}",
-            "select": "id,title,order_index,estimated_minutes,faithfulness_verdict",
+            "select": "id,title,order_index,estimated_minutes,prerequisites",
             "order": "order_index.asc",
         },
     )
 
     if not modules_raw:
         return CourseGraphOut(nodes=[], edges=[])
-
-    # Fetch prerequisites
-    module_ids = [m["id"] for m in modules_raw]
-    id_list = "(" + ",".join(module_ids) + ")"
-    prereqs_raw = await supabase_query(
-        "prerequisites",
-        params={
-            "module_id": f"in.{id_list}",
-            "select": "module_id,prerequisite_module_id",
-        },
-    )
 
     # Build nodes with simple grid layout (200px columns, 120px rows)
     nodes: list[GraphNode] = []
@@ -211,25 +178,25 @@ async def get_course_graph(course_id: str) -> CourseGraphOut:
                     "label": m["title"],
                     "order_index": m.get("order_index", i),
                     "estimated_minutes": m.get("estimated_minutes", 30),
-                    "faithfulness_verdict": m.get("faithfulness_verdict"),
                 },
                 position={"x": col * X_SPACING, "y": row * Y_SPACING},
                 type="default",
             )
         )
 
-    # Build edges from prerequisites
+    # Build edges from prerequisites JSONB array on each module
     edges: list[GraphEdge] = []
-    for p in prereqs_raw:
-        edge_id = f"e-{p['prerequisite_module_id']}-{p['module_id']}"
-        edges.append(
-            GraphEdge(
-                id=edge_id,
-                source=p["prerequisite_module_id"],  # prereq → module (arrow direction)
-                target=p["module_id"],
-                animated=False,
+    for m in modules_raw:
+        for prereq_id in (m.get("prerequisites") or []):
+            edge_id = f"e-{prereq_id}-{m['id']}"
+            edges.append(
+                GraphEdge(
+                    id=edge_id,
+                    source=prereq_id,
+                    target=m["id"],
+                    animated=False,
+                )
             )
-        )
 
     return CourseGraphOut(nodes=nodes, edges=edges)
 
@@ -317,7 +284,7 @@ async def get_module_assessments(course_id: str, module_id: str) -> list[Assessm
 
     Validates that the module belongs to the given course.
     """
-    # Verify module belongs to course
+    # Verify module belongs to course — return empty list instead of 404
     modules = await supabase_query(
         "modules",
         params={
@@ -327,16 +294,13 @@ async def get_module_assessments(course_id: str, module_id: str) -> list[Assessm
         },
     )
     if not modules:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Module {module_id} not found in course {course_id}.",
-        )
+        return []
 
     assessments_raw = await supabase_query(
         "assessments",
         params={
             "module_id": f"eq.{module_id}",
-            "select": "id,question,question_type,options,correct_answer,difficulty_tier",
+            "select": "id,question,question_type,options,answer,reference_explanation",
         },
     )
 
@@ -346,8 +310,8 @@ async def get_module_assessments(course_id: str, module_id: str) -> list[Assessm
             question=a["question"],
             question_type=a["question_type"],
             options=a.get("options"),
-            correct_answer=a["correct_answer"],
-            difficulty_tier=a["difficulty_tier"],
+            answer=a["answer"],
+            reference_explanation=a.get("reference_explanation"),
         )
         for a in assessments_raw
     ]
