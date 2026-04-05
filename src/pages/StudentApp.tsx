@@ -317,7 +317,7 @@ export default function StudentApp() {
 
       setMessages(prev => [...prev, {
         role: "ai",
-        text: feedback,
+        text: feedback + (result.grade_letter ? "\n\nGrade: " + result.grade_letter + " — " + (result.learning_verdict || "") : "") + (result.correct_points?.length ? "\n✓ " + result.correct_points.join("\n✓ ") : "") + (result.incorrect_points?.length ? "\n✗ " + result.incorrect_points.join("\n✗ ") : "") + (result.missing_points?.length ? "\n⚠ Missing: " + result.missing_points.join("\n⚠ Missing: ") : ""),
         mastery,
         scores: result.scores,
       }]);
