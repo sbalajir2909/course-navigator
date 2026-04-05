@@ -284,6 +284,11 @@ export default function StudentApp() {
     setMessages(prev => [...prev, { role: "user", text: chip }]);
 
     if (chip.startsWith("I understand")) {
+      // Ask for a real explanation instead of auto-submitting
+      setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, chips: [] } : m));
+      setMessages(prev => [...prev, { role: "user", text: chip }]);
+      setMessages(prev => [...prev, { role: "ai", text: "Great! Now explain it in your own words so I can confirm you've got it. What is the core concept here and why does it matter?", chips: [] }]);
+      return; // Do NOT auto-submit — wait for real explanation
       await submitExplanation("I understand this concept well and can explain it.");
     } else if (chip.startsWith("Give me a hint")) {
       setStrategyIndex(1);
