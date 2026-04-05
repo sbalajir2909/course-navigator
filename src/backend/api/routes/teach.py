@@ -64,6 +64,9 @@ class StartSessionResponse(BaseModel):
     mastery_score: float
     recommended_strategy: str
     prior_mastery: float
+    concept_index: int = 0
+    total_concepts: int = 1
+    current_concept_title: str = ""
 
 class ExplainRequest(BaseModel):
     explanation: str
@@ -83,6 +86,10 @@ class ExplainResponse(BaseModel):
     prerequisite_modules: list[dict]
     next_strategy: str | None
     what_they_got_right: str = ""
+    concept_index: int = 0
+    total_concepts: int = 1
+    concept_complete: bool = False
+    prerequisite_recommendations: list[dict] = []
     # Legacy compat
     overall_score: float = 0.0
     feedback: str = ""
@@ -166,6 +173,10 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
     })
 
     # Build initial LangGraph state
+    # Get concepts from module
+    concepts = module.get("concepts", [])
+    total_concepts = len(concepts) if concepts else 1
+
     initial_state = {
         "session_id": session_id,
         "student_id": student_id,
@@ -182,6 +193,8 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
         "pain_point": "",
         "should_advance": False,
         "should_flag": False,
+        "concept_index": 0,
+        "total_concepts": total_concepts,
     }
 
     # Run teach node via graph
@@ -195,6 +208,10 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
     s["source_chunks"] = source_chunks
     set_session(session_id, s)
 
+    current_concept_title = ""
+    if concepts and len(concepts) > 0:
+        current_concept_title = concepts[0].get("title", "")
+
     return StartSessionResponse(
         session_id=session_id,
         student_id=student_id,
@@ -203,6 +220,9 @@ async def start_session(body: StartSessionRequest) -> StartSessionResponse:
         mastery_score=prior_mastery,
         recommended_strategy=recommended_strategy,
         prior_mastery=prior_mastery,
+        concept_index=0,
+        total_concepts=total_concepts,
+        current_concept_title=current_concept_title,
     )
 
 
@@ -232,6 +252,7 @@ async def stream_explanation(
                 strategy=state.get("teaching_strategy", "direct"),
                 pain_point=state.get("pain_point", ""),
                 attempt_number=state.get("attempt_number", 1),
+                concept_index=state.get("concept_index", 0),
             )
             state["current_explanation"] = explanation
             set_session(session_id, state)
@@ -361,6 +382,60 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         except Exception:
             pass
 
+    # Handle concept advancement within a module
+    concept_index = state.get("concept_index", 0)
+    total_concepts = state.get("total_concepts", 1)
+    concept_complete = False
+    prereq_recs = []
+
+    if verdict == "MASTERED":
+        # Advance to next concept within module
+        next_concept_index = concept_index + 1
+        state["concept_index"] = next_concept_index
+        state["attempt_number"] = 1  # reset attempts for new concept
+        state["pain_point"] = ""
+        state["student_history"] = []
+
+        concept_complete = next_concept_index >= total_concepts
+
+        if concept_complete:
+            # All concepts in module done — advance to next module
+            next_action = "advance"
+        else:
+            # More concepts to teach — reteach next concept
+            next_action = "next_concept"
+            should_advance = False
+
+        if not concept_complete:
+            set_session(session_id, state)
+
+    elif should_flag and attempt_number >= 3:
+        # Student struggling after 3+ attempts — surface prerequisites
+        try:
+            from agents.grading_agent import compute_learning_curve_score
+            module_obj = state.get("module", {})
+            concepts_missed = result.get("concepts_missed", [])
+            if concepts_missed:
+                from groq import Groq as _G
+                gc = _G(api_key=os.getenv("GROQ_API_KEY"))
+                pr = gc.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[{"role": "user", "content": f"""The student is struggling with: {module_obj.get('title', '')}
+They are missing: {concepts_missed}
+
+Suggest 2 prerequisite topics that would help. Return JSON:
+{{"recommendations": [{{"topic": "...", "reason": "one sentence why this helps", "brief_explanation": "2-3 sentences"}}]}}"""}],
+                    temperature=0.3,
+                    response_format={"type": "json_object"},
+                    max_tokens=300,
+                )
+                pr_data = __import__("json").loads(pr.choices[0].message.content)
+                prereq_recs = pr_data.get("recommendations", [])
+                state["prerequisite_modules"] = prereq_recs
+                set_session(session_id, state)
+        except Exception:
+            pass
+
     return ExplainResponse(
         session_id=session_id,
         attempt_number=new_attempt,
@@ -378,6 +453,10 @@ async def submit_explanation(session_id: str, body: ExplainRequest) -> ExplainRe
         feedback=feedback,
         mastery_score=mastery,
         what_they_got_right=result.get("what_they_got_right", ""),
+        concept_index=state.get("concept_index", concept_index),
+        total_concepts=total_concepts,
+        concept_complete=concept_complete,
+        prerequisite_recommendations=prereq_recs,
     )
 
 
