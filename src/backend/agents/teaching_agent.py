@@ -137,9 +137,9 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
 
     try:
         resp = gclient.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.1-8b-instant",  # GROQ_TEACH_MODEL
             messages=messages,
-            max_tokens=250,
+            max_tokens=250,  # MAX_TOKENS_TEACH
             temperature=0.4,
         )
         explanation = resp.choices[0].message.content.strip()
@@ -150,7 +150,7 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=250,
+                max_tokens=250,  # MAX_TOKENS_TEACH
                 temperature=0.4,
             )
             explanation = response.choices[0].message.content.strip()
@@ -162,9 +162,9 @@ Explain ONLY this specific concept. Maximum 6 sentences. End with your question.
         messages[-1]["content"] += "\n\nCRITICAL: Only teach what IS in the source. Never mention gaps or what the source doesn't cover."
         try:
             resp2 = gclient.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="llama-3.1-8b-instant",  # GROQ_TEACH_MODEL
                 messages=messages,
-                max_tokens=250,
+                max_tokens=250,  # MAX_TOKENS_TEACH
                 temperature=0.2,
             )
             explanation = resp2.choices[0].message.content.strip()
