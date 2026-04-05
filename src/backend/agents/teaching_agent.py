@@ -114,25 +114,29 @@ Explain the concept now. Maximum 6 sentences. End with your question."""
     if total_chars > 8000:
         messages = [messages[0], messages[-1]]
 
+    # Primary: Groq (free). Fallback: GPT-4o-mini.
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+        from groq import Groq as _Groq
+        _gclient = _Groq(api_key=os.getenv("GROQ_API_KEY"))
+        _gr = _gclient.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=messages,
             max_tokens=250,
             temperature=0.4,
         )
-        explanation = response.choices[0].message.content.strip()
+        explanation = _gr.choices[0].message.content.strip()
     except Exception:
-        # Fallback to Groq
-        from groq import Groq
-        gclient = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        gr = gclient.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=messages,
-            max_tokens=250,
-            temperature=0.4,
-        )
-        explanation = gr.choices[0].message.content.strip()
+        # Fallback to GPT-4o-mini
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=250,
+                temperature=0.4,
+            )
+            explanation = response.choices[0].message.content.strip()
+        except Exception:
+            explanation = f"Let me explain {module.get('title', 'this concept')} differently. {module.get('description', '')} What part would you like me to clarify?"
 
     # Forbidden phrase check — regenerate once if triggered
     has_forbidden = any(phrase.lower() in explanation.lower() for phrase in FORBIDDEN_PHRASES)
