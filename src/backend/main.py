@@ -31,6 +31,8 @@ from api.routes.teach import router as teach_router
 from api.routes.dashboard import router as dashboard_router
 from api.routes.ground import router as ground_router
 from api.routes.auth import router as auth_router
+from api.routes.students import router as students_router
+from api.routes.assignments import router as assignments_router
 
 # ─────────────────────────────────────────────────────────
 # App initialisation
@@ -70,6 +72,8 @@ app.include_router(teach_router)
 app.include_router(dashboard_router)
 app.include_router(ground_router)
 app.include_router(auth_router)
+app.include_router(students_router)
+app.include_router(assignments_router)
 
 # ─────────────────────────────────────────────────────────
 # Health check
